@@ -68,3 +68,58 @@ assert.deepEqual(res, { added: 2, skipped: 0, errors: 1 });
 assert.equal(balances(S3).get(S3.accounts[0].id), 120000 - 4530);
 
 console.log('Todas las pruebas han pasado ✔');
+
+// ---------- Versión 1.5: divisiones, etiquetas, comisiones, saldo acumulado, papelera ----------
+import { txParts, byCategory, spentInCategory, runningBalances, byTag, parseTags, allTags, purgeTrash, FEE_CATEGORY } from '../js/model.js';
+{
+  const T = newState();
+  const [c1, c2] = T.accounts; c1.initial = 10000; c2.initial = 0;
+  const [food, rest] = T.categories;
+  // gasto de 80 dividido en 60 + 20
+  T.tx.push({ id: 'a', ts: 1, type: 'expense', amount: 8000, accountId: c1.id, categoryId: null, splits: [{ categoryId: food.id, amount: 6000 }, { categoryId: rest.id, amount: 2000 }], date: '2026-11-01', note: 'compra', tags: ['Viaje', 'coche'] });
+  // transferencia de 10 con 1 de comisión
+  T.tx.push({ id: 'b', ts: 2, type: 'transfer', amount: 1000, fee: 100, accountId: c1.id, toAccountId: c2.id, date: '2026-11-02', note: '' });
+  T.tx.push({ id: 'c', ts: 3, type: 'expense', amount: 500, accountId: c2.id, categoryId: food.id, date: '2026-11-03', note: '', tags: ['viaje'] });
+  const bb = balances(T);
+  assert.equal(bb.get(c1.id), 10000 - 8000 - 1000 - 100);
+  assert.equal(bb.get(c2.id), 1000 - 500);
+  assert.deepEqual(monthTotals(T, '2026-11'), { income: 0, expense: 8000 + 100 + 500, net: -8600 });
+  assert.equal(spentInCategory(T, '2026-11', food.id), 6500);
+  assert.equal(spentInCategory(T, '2026-11', rest.id), 2000);
+  const cats = byCategory(T, '2026-11', 'expense');
+  assert.equal(cats.reduce((s, c) => s + c.total, 0), 8600); // las categorías suman lo mismo que el total
+  assert.equal(cats.find((c) => c.cat === FEE_CATEGORY).total, 100);
+  assert.equal(txParts(T.tx[2]).length, 1);
+  // saldo acumulado
+  const r1 = runningBalances(T, c1.id);
+  assert.deepEqual([r1.get('a'), r1.get('b'), r1.get('c')], [2000, 900, 900]);
+  const rAll = runningBalances(T);
+  assert.deepEqual([rAll.get('a'), rAll.get('b'), rAll.get('c')], [2000, 1900, 1400]);
+  assert.equal(rAll.get('c'), bb.get(c1.id) + bb.get(c2.id)); // el último saldo acumulado = patrimonio
+  assert.equal(netWorthSeries(T, '2026-11', 1)[0].value, 1400);
+  // etiquetas
+  assert.deepEqual(parseTags(' #Viaje, coche ,, viaje;moto'), ['Viaje', 'coche', 'moto']);
+  assert.equal(allTags(T).length, 2);
+  assert.deepEqual(byTag(T, '2026-11'), [{ tag: 'Viaje', total: 8000 }, { tag: 'coche', total: 8000 }, { tag: 'viaje', total: 500 }]);
+  // CSV con divisiones, etiquetas y comisión: exportar e importar conserva los saldos
+  const rows2 = parseCSV(toCSV(T));
+  assert.equal(rows2.length, 1 + 4); // la división ocupa dos filas
+  assert.deepEqual(importOwnCSV(T, rows2), { added: 0, skipped: 4, errors: 0 }); // reimportar no duplica
+  const T2 = newState(); T2.accounts[0].initial = 10000;
+  importOwnCSV(T2, rows2);
+  assert.equal(balances(T2).get(T2.accounts[0].id), bb.get(c1.id));
+  assert.equal(balances(T2).get(T2.accounts[1].id), bb.get(c2.id));
+  assert.deepEqual(T2.tx.find((t) => t.type === 'transfer').fee, 100);
+  assert.deepEqual(T2.tx[0].tags, ['Viaje', 'coche']);
+  // un CSV antiguo (7 columnas) se sigue reconociendo
+  assert.ok(isOwnCSV(['Fecha', 'Tipo', 'Importe', 'Cuenta', 'Cuenta destino', 'Categoría', 'Nota']));
+  // papelera: se vacía sola a los 30 días
+  T.trash.push({ tx: { id: 'x' }, deletedAt: Date.now() - 31 * 864e5 }, { tx: { id: 'y' }, deletedAt: Date.now() });
+  assert.equal(purgeTrash(T), 1);
+  assert.equal(T.trash[0].tx.id, 'y');
+  // recurrente de transferencia con comisión
+  T.recurring.push({ id: 'r2', type: 'transfer', amount: 1000, fee: 50, accountId: c1.id, toAccountId: c2.id, note: 'Ahorro', freq: 'monthly', interval: 1, nextDate: '2026-11-05', anchorDay: 5, active: true });
+  runRecurring(T, '2026-11-06');
+  assert.equal(T.tx.at(-1).fee, 50);
+  console.log('Pruebas de la versión 1.5 superadas ✔');
+}

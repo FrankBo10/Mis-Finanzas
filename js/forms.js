@@ -25,15 +25,25 @@ export function openSheet({ title, body, onSave, saveLabel = 'Guardar', cancelLa
    type: 'text' | 'password' | 'money' | 'number' | 'date' | 'color' | 'select' | 'seg'
    - options: [[valor, texto], ...] o una función (valores) => opciones
    - showIf: (valores) => true/false para mostrar u ocultar el campo */
-export function openForm({ title, intro, fields, values = {}, onSave, onDelete, deleteLabel = 'Eliminar', validate, extraButtons = [] }) {
+export function openForm({ title, intro, fields, values = {}, onSave, onDelete, deleteLabel = 'Eliminar', validate, extraButtons = [], onChange }) {
   const vals = { ...values };
   const ctl = [];
   const err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
 
+  // Lo que reciben los campos 'custom': los valores, una función para repintar y acceso a las casillas.
+  const api = { vals, refresh: () => refresh(), input: (key) => ctl.find((c) => c.f.key === key)?.input };
+
   const refresh = () => {
+    if (onChange) onChange(vals);
     for (const c of ctl) {
       const f = c.f;
       c.row.hidden = f.showIf ? !f.showIf(vals) : false;
+      if (f.type === 'custom') {
+        const content = c.row.hidden ? null : f.render(api);
+        c.input.replaceChildren(...[content].flat().filter(Boolean));
+        if (!content) c.row.hidden = true;
+        continue;
+      }
       if (f.type === 'select') {
         const opts = typeof f.options === 'function' ? f.options(vals) : f.options;
         const sig = JSON.stringify(opts);
@@ -52,7 +62,9 @@ export function openForm({ title, intro, fields, values = {}, onSave, onDelete, 
   const body = h('div', { class: 'form-body' }, intro && h('p', { class: 'form-intro' }, intro));
   for (const f of fields) {
     let input;
-    if (f.type === 'select') {
+    if (f.type === 'custom') {
+      input = h('div');
+    } else if (f.type === 'select') {
       input = h('select', { onchange: () => { vals[f.key] = input.value; refresh(); } });
     } else if (f.type === 'seg') {
       input = h('div', { class: 'seg' }, f.options.map(([v, l]) =>
@@ -74,8 +86,8 @@ export function openForm({ title, intro, fields, values = {}, onSave, onDelete, 
       // Al tocar una casilla de importe que ya tiene valor, se selecciona entero para sustituirlo al escribir.
       if (money) input.addEventListener('focus', () => setTimeout(() => { try { input.setSelectionRange(0, input.value.length); } catch { /* sin selección */ } }, 0));
     }
-    const row = h(f.type === 'seg' ? 'div' : 'label', { class: 'field' },
-      h('span', { class: 'field-label' }, f.label), input, f.hint && h('span', { class: 'field-hint' }, f.hint));
+    const row = h(f.type === 'seg' || f.type === 'custom' ? 'div' : 'label', { class: 'field' },
+      f.label && h('span', { class: 'field-label' }, f.label), input, f.hint && h('span', { class: 'field-hint' }, f.hint));
     ctl.push({ f, row, input });
     body.append(row);
   }
@@ -88,6 +100,7 @@ export function openForm({ title, intro, fields, values = {}, onSave, onDelete, 
     for (const c of ctl) {
       const f = c.f;
       if (c.row.hidden) { out[f.key] = null; continue; }
+      if (f.type === 'custom') { out[f.key] = vals[f.key] ?? null; continue; }
       if (f.type === 'select' || f.type === 'seg') { out[f.key] = vals[f.key] === '' || vals[f.key] == null ? null : vals[f.key]; continue; }
       const raw = f.type === 'password' ? c.input.value : c.input.value.trim();
       if (raw === '') {

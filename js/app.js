@@ -2,7 +2,7 @@
 import { $, h, todayStr } from './util.js';
 import { KDF_ITER, deriveKey, encryptJSON, decryptJSON, randomBytes, toB64, fromB64 } from './crypto.js';
 import { loadVault, saveVault, clearVault } from './storage.js';
-import { newState, migrate, runRecurring } from './model.js';
+import { newState, migrate, runRecurring, purgeTrash } from './model.js';
 import { initViews, render, go, resetNav, editTx } from './views.js';
 import { toast, closeAllSheets, confirmDialog } from './forms.js';
 import { VERSION } from './version.js';
@@ -87,6 +87,7 @@ function enter() {
   $('#pw').value = ''; $('#pw2').value = '';
   applyTheme();
   resetNav();
+  if (purgeTrash(app.state)) save(); // vacía de la papelera lo que lleve más de 30 días
   const n = runRecurring(app.state);
   if (n) { save(); toast(`🔁 Se han apuntado ${n} movimientos recurrentes`); }
   render();

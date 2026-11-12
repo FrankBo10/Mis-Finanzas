@@ -3,7 +3,7 @@
 //
 // IMPORTANTE: si cambias cualquier archivo de la app, sube este número
 // (y pon el mismo en js/version.js) para que los móviles descarguen la versión nueva.
-const CACHE = 'mis-finanzas-v1.4';
+const CACHE = 'mis-finanzas-v1.5';
 
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.webmanifest',

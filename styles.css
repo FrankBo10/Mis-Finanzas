@@ -187,3 +187,14 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
 /* ---------- Versión ---------- */
 .version { text-align: center; color: var(--muted); font-size: .75rem; margin: 18px 0 0; }
 .banner.update { color: var(--accent); }
+
+/* ---------- Divisiones, etiquetas y saldo acumulado ---------- */
+.amt-col { display: flex; flex-direction: column; align-items: flex-end; flex: none; }
+.saldo { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.split-row { display: grid; grid-template-columns: 1fr 104px 40px; gap: 8px; margin-bottom: 8px; align-items: center; }
+.split-row input { text-align: right; }
+.split-row .del { color: var(--expense); min-height: 44px; text-align: center; }
+.split-sum { font-weight: 600; margin: 4px 4px 12px; }
+.split-box { background: var(--card); border-radius: 10px; padding: 10px 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -8px; }
+.chip { background: var(--card); color: var(--accent); border-radius: 15px; padding: 5px 11px; font-size: .8rem; min-height: 30px; }

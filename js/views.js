@@ -1,17 +1,17 @@
 // Todas las pantallas de la app.
-import { h, $, uid, todayStr, addMonthsYm, monthLabel, dayLabel, shortDate, money, centsToInput } from './util.js';
+import { h, $, uid, todayStr, addMonthsYm, monthLabel, dayLabel, shortDate, money, centsToInput, parseAmount } from './util.js';
 import {
   balances, monthTotals, byCategory, spentInCategory, netWorthSeries, toCSV, parseCSV, isOwnCSV, importOwnCSV,
-  importGenericCSV, PALETTE, ACCOUNT_TYPES, ACCOUNT_ICONS,
+  importGenericCSV, PALETTE, ACCOUNT_TYPES, ACCOUNT_ICONS, txParts, runningBalances, allTags, parseTags, byTag, TRASH_DAYS,
 } from './model.js';
 import { donut, bars, line } from './charts.js';
 import { openForm, openSheet, toast, confirmDialog } from './forms.js';
 
 let app;
-const nav = { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '', repKind: 'expense' };
+const nav = { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '', filterTag: '', repKind: 'expense' };
 
 export function initViews(a) { app = a; }
-export function resetNav() { Object.assign(nav, { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '' }); }
+export function resetNav() { Object.assign(nav, { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '', filterTag: '' }); }
 export function go(tab, sub = null) { nav.tab = tab; nav.sub = sub; render(); window.scrollTo(0, 0); }
 
 export function render() {
@@ -39,16 +39,32 @@ function monthNav() {
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Mes siguiente', onclick: move(1) }, '›'));
 }
 
-function txRow(t) {
-  const cat = app.state.categories.find((c) => c.id === t.categoryId);
+const catOf = (id) => app.state.categories.find((c) => c.id === id);
+
+// Fila de un movimiento. "saldo" (opcional) es el saldo acumulado que quedó tras él.
+function txRow(t, saldo, onclick) {
   const isTr = t.type === 'transfer';
-  const title = isTr ? `${accName(t.accountId)} → ${accName(t.toAccountId)}` : cat?.name || 'Sin categoría';
-  const sub = [!isTr && accName(t.accountId), t.note, t.recurringId && '🔁'].filter(Boolean).join(' · ');
+  const parts = txParts(t);
+  const split = parts.length > 1;
+  const cat = split ? null : catOf(parts[0].categoryId);
+  const title = isTr ? `${accName(t.accountId)} → ${accName(t.toAccountId)}`
+    : split ? parts.map((p) => catOf(p.categoryId)?.name || 'Sin categoría').join(' + ')
+    : cat?.name || 'Sin categoría';
+  const sub = [
+    !isTr && accName(t.accountId),
+    split && `dividido en ${parts.length}`,
+    isTr && t.fee ? `comisión ${fmt(t.fee)}` : null,
+    t.note,
+    (t.tags || []).map((x) => '#' + x).join(' '),
+    t.recurringId && '🔁',
+  ].filter(Boolean).join(' · ');
   const sign = t.type === 'expense' ? '−' : t.type === 'income' ? '+' : '';
-  return h('button', { type: 'button', class: 'row', onclick: () => editTx(t) },
-    h('span', { class: 'ico' }, isTr ? '↔️' : cat?.icon || '❔'),
+  return h('button', { type: 'button', class: 'row', onclick: onclick || (() => editTx(t)) },
+    h('span', { class: 'ico' }, isTr ? '↔️' : split ? '🧩' : cat?.icon || '❔'),
     h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, title), sub && h('span', { class: 'row-sub' }, sub)),
-    h('span', { class: 'amt ' + t.type }, sign + fmt(t.amount)));
+    h('span', { class: 'amt-col' },
+      h('span', { class: 'amt ' + t.type }, sign + fmt(t.amount)),
+      saldo != null && h('span', { class: 'saldo' }, fmt(saldo))));
 }
 
 function progress(pct) {
@@ -98,7 +114,7 @@ function homeView() {
       h('span', { class: 'ico' }, '🔁'),
       h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, r.note || recurringTitle(r)), h('span', { class: 'row-sub' }, shortDate(r.nextDate))),
       h('span', { class: 'amt ' + r.type }, fmt(r.amount))))) : null,
-    card('Últimos movimientos', recent.length ? recent.map(txRow) : empty('Todavía no hay movimientos. Pulsa el botón + para añadir el primero.')),
+    card('Últimos movimientos', recent.length ? recent.map((t) => txRow(t)) : empty('Todavía no hay movimientos. Pulsa el botón + para añadir el primero.')),
     h('p', { class: 'version' }, 'Mis Finanzas · versión ' + app.version));
 }
 
@@ -106,28 +122,36 @@ function homeView() {
 function txView() {
   const S = app.state;
   const list = h('div');
+  const tags = allTags(S);
+  if (nav.filterTag && !tags.includes(nav.filterTag)) nav.filterTag = '';
   const fill = () => {
     const q = nav.search.trim().toLowerCase();
-    let items = S.tx.filter((t) => (q || t.date.startsWith(nav.month)) && (!nav.filterAcc || t.accountId === nav.filterAcc || t.toAccountId === nav.filterAcc));
+    const running = runningBalances(S, nav.filterAcc); // saldo acumulado tras cada movimiento
+    let items = S.tx.filter((t) => (q || t.date.startsWith(nav.month))
+      && (!nav.filterAcc || t.accountId === nav.filterAcc || t.toAccountId === nav.filterAcc)
+      && (!nav.filterTag || (t.tags || []).includes(nav.filterTag)));
     if (q) {
       items = items.filter((t) => {
-        const cat = S.categories.find((c) => c.id === t.categoryId)?.name || '';
-        return [t.note || '', cat, accName(t.accountId), centsToInput(t.amount)].some((x) => x.toLowerCase().includes(q));
+        const cats = txParts(t).map((p) => catOf(p.categoryId)?.name || '');
+        return [t.note || '', ...cats, ...(t.tags || []), accName(t.accountId), centsToInput(t.amount)].some((x) => x.toLowerCase().includes(q));
       });
     }
     items.sort((a, b) => b.date.localeCompare(a.date) || (b.ts || 0) - (a.ts || 0));
     const shown = items.slice(0, 400);
     const out = [];
-    if (!shown.length) out.push(empty(q ? 'Ningún movimiento coincide con la búsqueda.' : 'No hay movimientos en este mes.'));
+    if (shown.length) out.push(h('p', { class: 'help' }, nav.filterAcc
+      ? `El número gris bajo cada importe es el saldo de ${accName(nav.filterAcc)} después de ese movimiento.`
+      : 'El número gris bajo cada importe es tu patrimonio total después de ese movimiento.'));
+    else out.push(empty(q || nav.filterTag ? 'Ningún movimiento coincide.' : 'No hay movimientos en este mes.'));
     let day = null, box = null;
     for (const t of shown) {
       if (t.date !== day) {
         day = t.date;
-        const net = items.filter((x) => x.date === day).reduce((s, x) => s + (x.type === 'income' ? x.amount : x.type === 'expense' ? -x.amount : 0), 0);
+        const net = items.filter((x) => x.date === day).reduce((s, x) => s + (x.type === 'income' ? x.amount : x.type === 'expense' ? -x.amount : -(x.fee || 0)), 0);
         box = h('section', { class: 'card' }, h('div', { class: 'split day-head' }, h('span', null, dayLabel(day)), h('span', null, fmt(net))));
         out.push(box);
       }
-      box.append(txRow(t));
+      box.append(txRow(t, running.get(t.id)));
     }
     if (items.length > shown.length) out.push(empty(`Se muestran los primeros ${shown.length} de ${items.length}. Afina la búsqueda para ver el resto.`));
     list.replaceChildren(...out);
@@ -137,42 +161,151 @@ function txView() {
   const accSel = h('select', { 'aria-label': 'Filtrar por cuenta', onchange: () => { nav.filterAcc = accSel.value; fill(); } },
     h('option', { value: '' }, 'Todas las cuentas'), S.accounts.map((a) => h('option', { value: a.id }, a.name)));
   accSel.value = nav.filterAcc;
+  const tagSel = tags.length ? h('select', { 'aria-label': 'Filtrar por etiqueta', onchange: () => { nav.filterTag = tagSel.value; fill(); } },
+    h('option', { value: '' }, 'Todas las etiquetas'), tags.map((x) => h('option', { value: x }, '#' + x))) : null;
+  if (tagSel) tagSel.value = nav.filterTag;
   fill();
-  return page('Movimientos', monthNav(), h('div', { class: 'filters' }, search, accSel), list);
+  return page('Movimientos', monthNav(), h('div', { class: 'filters' }, search, accSel, tagSel), list);
+}
+
+// Manda un movimiento a la papelera (se puede recuperar durante 30 días).
+function trashTx(t) {
+  const S = app.state;
+  const i = S.tx.indexOf(t);
+  if (i < 0) return;
+  S.tx.splice(i, 1);
+  const entry = { tx: t, deletedAt: Date.now() };
+  S.trash.push(entry);
+  changed();
+  toast('Movido a la papelera', { action: 'Deshacer', onAction: () => {
+    const T = app.state, j = T.trash.indexOf(entry);
+    if (j < 0) return;
+    T.trash.splice(j, 1); T.tx.push(t); changed();
+  } });
+}
+
+// Editor para repartir un movimiento entre varias categorías.
+function openSplitEditor({ kind, total, splits, categoryId }, onDone) {
+  const cats = app.state.categories.filter((c) => c.kind === kind && !c.archived);
+  if (cats.length < 2) return toast('Necesitas al menos dos categorías de este tipo');
+  const rows = [];
+  const list = h('div');
+  const sum = h('p', { class: 'split-sum' });
+  const err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+  const totalNow = () => rows.reduce((s, r) => s + Math.max(0, parseAmount(r.amt.value) || 0), 0);
+  const update = () => { sum.textContent = `Total del movimiento: ${fmt(totalNow())}`; };
+  const addRow = (catId, cents) => {
+    const sel = h('select', { 'aria-label': 'Categoría' }, cats.map((c) => h('option', { value: c.id }, `${c.icon} ${c.name}`)));
+    sel.value = cats.some((c) => c.id === catId) ? catId : (cats.find((c) => !rows.some((r) => r.sel.value === c.id)) || cats[0]).id;
+    const amt = h('input', { type: 'text', inputmode: 'decimal', placeholder: '0,00', 'aria-label': 'Importe de esta parte', autocomplete: 'off', oninput: update });
+    if (cents) amt.value = centsToInput(cents);
+    const row = { sel, amt };
+    row.el = h('div', { class: 'split-row' }, sel, amt,
+      h('button', { type: 'button', class: 'del', 'aria-label': 'Quitar esta parte', onclick: () => { rows.splice(rows.indexOf(row), 1); row.el.remove(); update(); } }, '✕'));
+    rows.push(row); list.append(row.el);
+  };
+  if (splits && splits.length) splits.forEach((p) => addRow(p.categoryId, p.amount));
+  else { addRow(categoryId, total); addRow(null, null); }
+  update();
+  const body = h('div', { class: 'form-body' },
+    h('p', { class: 'form-intro' }, 'Reparte el importe entre varias categorías. Ejemplo: una compra de 80 € con 60 € de comida y 20 € de ropa. El importe total del movimiento será la suma de las partes.'),
+    list,
+    h('button', { type: 'button', class: 'btn block', onclick: () => addRow(null, null) }, '+ Añadir otra parte'),
+    sum, err);
+  openSheet({
+    title: 'Dividir', body, saveLabel: 'Aceptar',
+    onSave: (close) => {
+      const fail = (m) => { err.textContent = m; err.hidden = false; };
+      const merged = new Map();
+      for (const r of rows) {
+        if (r.amt.value.trim() === '') continue;
+        const cents = parseAmount(r.amt.value);
+        if (cents == null || cents <= 0) return fail('Hay un importe que no es válido. Ejemplo: 12,50');
+        merged.set(r.sel.value, (merged.get(r.sel.value) || 0) + cents);
+      }
+      if (merged.size < 2) return fail('Pon importe en al menos dos categorías distintas.');
+      close();
+      onDone([...merged.entries()].map(([id, amount]) => ({ categoryId: id, amount })));
+    },
+  });
 }
 
 export function editTx(t) {
   const S = app.state, isNew = !t;
   const accs = S.accounts.filter((a) => !a.archived || (t && (a.id === t.accountId || a.id === t.toAccountId))).map((a) => [a.id, a.name]);
   if (!accs.length) return toast('Primero crea una cuenta en Más → Cuentas');
-  const values = t ? { ...t, categoryId: t.categoryId ?? '' } : { type: 'expense', date: todayStr(), accountId: S.settings.lastAccountId, note: '' };
+  const values = t
+    ? { ...t, categoryId: t.categoryId ?? '', splits: t.splits ? t.splits.map((p) => ({ ...p })) : null, tagsText: (t.tags || []).join(', ') }
+    : { type: 'expense', date: todayStr(), accountId: S.settings.lastAccountId, note: '', splits: null, tagsText: '' };
   if (isNew) values.toAccountId = accs.find(([id]) => id !== (values.accountId || accs[0][0]))?.[0];
+  const known = allTags(S);
   openForm({
     title: isNew ? 'Nuevo movimiento' : 'Editar movimiento',
     values,
+    // Si cambias de gasto a ingreso (o a transferencia), la división anterior ya no vale.
+    onChange: (v) => { if (v.splits && (v.type === 'transfer' || v.splits.some((p) => catOf(p.categoryId)?.kind !== v.type))) v.splits = null; },
     fields: [
       { key: 'type', label: 'Tipo', type: 'seg', options: [['expense', 'Gasto'], ['income', 'Ingreso'], ['transfer', 'Transferencia']] },
       { key: 'amount', label: 'Importe', type: 'money', required: true, positive: true, autofocus: isNew },
-      { key: 'categoryId', label: 'Categoría', type: 'select', showIf: (v) => v.type !== 'transfer',
+      { key: 'categoryId', label: 'Categoría', type: 'select', showIf: (v) => v.type !== 'transfer' && !v.splits,
         options: (v) => [...S.categories.filter((c) => c.kind === v.type && (!c.archived || c.id === values.categoryId)).map((c) => [c.id, `${c.icon} ${c.name}`]), ['', 'Sin categoría']] },
+      { key: 'splits', type: 'custom', showIf: (v) => v.type !== 'transfer',
+        render: (api) => {
+          const v = api.vals;
+          const open = () => openSplitEditor(
+            { kind: v.type, total: parseAmount(api.input('amount').value) || null, splits: v.splits, categoryId: v.categoryId },
+            (parts) => { v.splits = parts; api.input('amount').value = centsToInput(parts.reduce((s2, p) => s2 + p.amount, 0)); api.refresh(); });
+          if (!v.splits) return h('button', { type: 'button', class: 'btn small', onclick: open }, 'Dividir entre varias categorías');
+          return h('div', { class: 'split-box' },
+            h('span', { class: 'field-label' }, 'Dividido entre categorías'),
+            v.splits.map((p) => { const c = catOf(p.categoryId); return h('div', { class: 'split' }, h('span', null, c ? `${c.icon} ${c.name}` : 'Sin categoría'), h('span', null, fmt(p.amount))); }),
+            h('div', { class: 'mini-btns' },
+              h('button', { type: 'button', class: 'btn small', onclick: open }, 'Cambiar'),
+              h('button', { type: 'button', class: 'btn small', onclick: () => { v.splits = null; api.refresh(); } }, 'Quitar división')));
+        } },
       { key: 'accountId', label: 'Cuenta', type: 'select', options: accs },
       { key: 'toAccountId', label: 'Cuenta destino', type: 'select', showIf: (v) => v.type === 'transfer', options: accs },
+      { key: 'fee', label: 'Comisión (opcional)', type: 'money', showIf: (v) => v.type === 'transfer', hint: 'Lo que te cobra el banco por la transferencia. Sale de la cuenta de origen y cuenta como gasto.' },
       { key: 'date', label: 'Fecha', type: 'date', required: true },
       { key: 'note', label: 'Nota (opcional)', type: 'text' },
+      { key: 'tagsText', label: 'Etiquetas (opcional, separadas por comas)', type: 'text', placeholder: 'Ej.: vacaciones, coche', maxlength: 200 },
+      { key: 'tagChips', type: 'custom',
+        render: (api) => (known.length ? h('div', { class: 'chips' }, known.slice(0, 20).map((tag) => h('button', { type: 'button', class: 'chip', onclick: () => {
+          const input = api.input('tagsText');
+          const cur = parseTags(input.value);
+          if (!cur.some((x) => x.toLowerCase() === tag.toLowerCase())) cur.push(tag);
+          input.value = cur.join(', ');
+        } }, '#' + tag))) : null) },
     ],
-    validate: (o) => (o.type === 'transfer' && o.accountId === o.toAccountId ? 'La cuenta de origen y la de destino deben ser distintas.' : null),
+    validate: (o) => {
+      if (o.type === 'transfer' && o.accountId === o.toAccountId) return 'La cuenta de origen y la de destino deben ser distintas.';
+      if (o.splits) {
+        const sum = o.splits.reduce((s2, p) => s2 + p.amount, 0);
+        if (sum !== o.amount) return `Las partes de la división suman ${fmt(sum)}, pero el importe es ${fmt(o.amount)}. Cambia la división o quítala.`;
+      }
+      return null;
+    },
     onSave: (o) => {
-      if (isNew) S.tx.push({ id: uid(), ts: Date.now(), ...o }); else Object.assign(t, o);
+      const data = {
+        type: o.type, amount: o.amount, accountId: o.accountId, date: o.date, note: o.note || '',
+        toAccountId: o.type === 'transfer' ? o.toAccountId : null,
+        fee: o.type === 'transfer' && o.fee > 0 ? o.fee : null,
+        splits: o.type !== 'transfer' && o.splits ? o.splits : null,
+        categoryId: o.type === 'transfer' || o.splits ? null : o.categoryId,
+        tags: parseTags(o.tagsText),
+      };
+      if (isNew) S.tx.push({ id: uid(), ts: Date.now(), ...data }); else Object.assign(t, data);
       S.settings.lastAccountId = o.accountId;
       changed();
       toast(isNew ? 'Movimiento guardado' : 'Cambios guardados');
     },
-    onDelete: isNew ? null : (close) => {
-      S.tx.splice(S.tx.indexOf(t), 1);
-      close(); changed();
-      toast('Movimiento eliminado', { action: 'Deshacer', onAction: () => { app.state.tx.push(t); changed(); } });
-    },
-    extraButtons: isNew ? [] : [{ label: 'Duplicar con fecha de hoy', onClick: (close) => { close(); S.tx.push({ ...t, id: uid(), ts: Date.now(), date: todayStr(), recurringId: null }); changed(); toast('Movimiento duplicado'); } }],
+    onDelete: isNew ? null : (close) => { close(); trashTx(t); },
+    deleteLabel: 'Mover a la papelera',
+    extraButtons: isNew ? [] : [{ label: 'Duplicar con fecha de hoy', onClick: (close) => {
+      close();
+      S.tx.push({ ...JSON.parse(JSON.stringify(t)), id: uid(), ts: Date.now(), date: todayStr(), recurringId: null });
+      changed(); toast('Movimiento duplicado');
+    } }],
   });
 }
 
@@ -201,6 +334,12 @@ function reportsView() {
             h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, `${c.cat.icon} ${c.cat.name}`)),
             h('span', { class: 'amt' }, fmt(c.total), h('small', null, ` ${Math.round((c.total / total) * 100)} %`)));
         })] : empty('No hay datos en este mes.')),
+    (() => {
+      const tg = byTag(S, ym);
+      return tg.length ? card('Gastos por etiqueta', tg.map((x) => h('div', { class: 'row static' },
+        h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, '#' + x.tag)), h('span', { class: 'amt' }, fmt(x.total)))),
+        h('p', { class: 'help' }, 'Un movimiento con varias etiquetas cuenta en cada una.')) : null;
+    })(),
     card('Últimos 6 meses', bars(months), h('p', { class: 'legend' }, h('span', { class: 'lg income' }, 'Ingresos'), h('span', { class: 'lg expense' }, 'Gastos'))),
     card('Evolución del patrimonio (12 meses)', line(netWorthSeries(S, ym, 12))));
 }
@@ -219,6 +358,7 @@ function moreView() {
       item('🐖', 'Metas de ahorro', null, () => go('more', 'goals')),
       item('🤝', 'Deudas y préstamos', null, () => go('more', 'debts'))),
     card(null,
+      item('🗑️', 'Papelera', S.trash.length ? `${S.trash.length} movimientos · se vacía sola a los ${TRASH_DAYS} días` : 'Vacía', () => go('more', 'trash')),
       item('💾', 'Copias de seguridad y datos', 'Exportar, importar, restaurar', () => go('more', 'data')),
       item('⚙️', 'Ajustes y seguridad', 'Moneda, tema, bloqueo, contraseña', () => go('more', 'settings')),
       item('🔒', 'Bloquear ahora', null, () => app.lock()),
@@ -237,7 +377,7 @@ function accountsView() {
 
 function editAccount(a) {
   const S = app.state, isNew = !a;
-  const used = a && (S.tx.some((t) => t.accountId === a.id || t.toAccountId === a.id) || S.recurring.some((r) => r.accountId === a.id || r.toAccountId === a.id));
+  const used = a && ([...S.tx, ...S.trash.map((x) => x.tx)].some((t) => t.accountId === a.id || t.toAccountId === a.id) || S.recurring.some((r) => r.accountId === a.id || r.toAccountId === a.id));
   openForm({
     title: isNew ? 'Nueva cuenta' : 'Editar cuenta',
     values: a ? { ...a, archived: a.archived ? 'yes' : 'no' } : { type: 'bank', initial: 0, archived: 'no' },
@@ -253,7 +393,7 @@ function editAccount(a) {
       changed();
     },
     onDelete: isNew ? null : async (close) => {
-      if (used) return toast('Esta cuenta tiene movimientos. No se puede borrar, pero puedes archivarla.');
+      if (used) return toast('Esta cuenta tiene movimientos (o los tiene en la papelera). No se puede borrar, pero puedes archivarla.');
       if (!(await confirmDialog(`¿Eliminar la cuenta "${a.name}"?`, { ok: 'Eliminar', danger: true }))) return;
       S.accounts.splice(S.accounts.indexOf(a), 1); close(); changed();
     },
@@ -290,10 +430,13 @@ function editCategory(c) {
       changed();
     },
     onDelete: isNew ? null : async (close) => {
-      const n = S.tx.filter((t) => t.categoryId === c.id).length;
+      const n = S.tx.filter((t) => txParts(t).some((p) => p.categoryId === c.id)).length;
       const msg = n ? `¿Eliminar "${c.name}"? Sus ${n} movimientos NO se borran: quedarán como "Sin categoría".` : `¿Eliminar la categoría "${c.name}"?`;
       if (!(await confirmDialog(msg, { ok: 'Eliminar', danger: true }))) return;
-      for (const t of S.tx) if (t.categoryId === c.id) t.categoryId = null;
+      for (const t of [...S.tx, ...S.trash.map((x) => x.tx)]) {
+        if (t.categoryId === c.id) t.categoryId = null;
+        for (const part of t.splits || []) if (part.categoryId === c.id) part.categoryId = null;
+      }
       for (const r of S.recurring) if (r.categoryId === c.id) r.categoryId = null;
       S.budgets = S.budgets.filter((b) => b.categoryId !== c.id);
       S.categories.splice(S.categories.indexOf(c), 1); close(); changed();
@@ -376,6 +519,7 @@ function editRecurring(r) {
         options: (v) => [...S.categories.filter((c) => c.kind === v.type && !c.archived).map((c) => [c.id, `${c.icon} ${c.name}`]), ['', 'Sin categoría']] },
       { key: 'accountId', label: 'Cuenta', type: 'select', options: accs },
       { key: 'toAccountId', label: 'Cuenta destino', type: 'select', showIf: (v) => v.type === 'transfer', options: accs },
+      { key: 'fee', label: 'Comisión (opcional)', type: 'money', showIf: (v) => v.type === 'transfer' },
       { key: 'freq', label: 'Frecuencia', type: 'select', options: FREQ },
       { key: 'interval', label: 'Repetir cada (1 = cada mes/semana/año, 2 = cada dos…)', type: 'number', required: true },
       { key: 'nextDate', label: 'Próxima fecha', type: 'date', required: true, hint: 'Si pones una fecha pasada, se apuntarán todos los que falten hasta hoy.' },
@@ -477,6 +621,37 @@ function editDebt(d) {
       S.debts.splice(S.debts.indexOf(d), 1); close(); changed();
     },
   });
+}
+
+// ---------- Papelera ----------
+function trashView() {
+  const S = app.state;
+  const items = [...S.trash].sort((a, b) => b.deletedAt - a.deletedAt);
+  const restore = (x) => {
+    const t = x.tx;
+    if (!S.accounts.some((a) => a.id === t.accountId) || (t.type === 'transfer' && !S.accounts.some((a) => a.id === t.toAccountId))) {
+      return toast('No se puede recuperar: su cuenta ya no existe.');
+    }
+    S.trash.splice(S.trash.indexOf(x), 1); S.tx.push(t); changed(); toast('Movimiento recuperado');
+  };
+  const openItem = (x) => {
+    const days = Math.max(0, TRASH_DAYS - Math.floor((Date.now() - x.deletedAt) / 864e5));
+    const sheet = openSheet({ title: 'En la papelera', cancelLabel: 'Cerrar', body: h('div', { class: 'form-body' },
+      h('section', { class: 'card' }, txRow(x.tx, null, () => {})),
+      h('p', { class: 'form-intro' }, `Fecha del movimiento: ${shortDate(x.tx.date)}. Se borrará para siempre en ${days} días.`),
+      h('button', { type: 'button', class: 'btn block primary', onclick: () => { sheet.close(); restore(x); } }, 'Recuperar'),
+      h('button', { type: 'button', class: 'btn block danger', onclick: async () => {
+        if (!(await confirmDialog('¿Borrar este movimiento para siempre?', { ok: 'Borrar', danger: true }))) return;
+        sheet.close(); S.trash.splice(S.trash.indexOf(x), 1); changed();
+      } }, 'Borrar para siempre')) });
+  };
+  return subPage('Papelera',
+    h('p', { class: 'help' }, `Los movimientos que borras se guardan aquí ${TRASH_DAYS} días por si te equivocas. No cuentan en saldos ni informes. Toca uno para recuperarlo.`),
+    card(null, items.length ? items.map((x) => txRow(x.tx, null, () => openItem(x))) : empty('La papelera está vacía.')),
+    items.length ? h('button', { type: 'button', class: 'btn block danger', onclick: async () => {
+      if (!(await confirmDialog(`¿Borrar para siempre los ${items.length} movimientos de la papelera?`, { ok: 'Vaciar', danger: true }))) return;
+      S.trash = []; changed();
+    } }, 'Vaciar papelera') : null);
 }
 
 // ---------- Copias de seguridad y datos ----------
@@ -648,4 +823,4 @@ function aboutView() {
 }
 
 const TABS = { home: homeView, tx: txView, reports: reportsView, more: moreView };
-const SUBS = { accounts: accountsView, categories: categoriesView, budgets: budgetsView, recurring: recurringView, goals: goalsView, debts: debtsView, data: dataView, settings: settingsView, about: aboutView };
+const SUBS = { accounts: accountsView, categories: categoriesView, budgets: budgetsView, recurring: recurringView, trash: trashView, goals: goalsView, debts: debtsView, data: dataView, settings: settingsView, about: aboutView };

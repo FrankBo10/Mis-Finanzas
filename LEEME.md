@@ -58,8 +58,8 @@ Luego abre http://localhost:8000 en el navegador.
 
 Sube el número de versión en DOS sitios (deben coincidir):
 
-- `js/version.js`: `VERSION = '1.4'` → `'1.5'`
-- `sw.js`: `mis-finanzas-v1.4` → `mis-finanzas-v1.5`
+- `js/version.js`: `VERSION = '1.5'` → `'1.6'`
+- `sw.js`: `mis-finanzas-v1.5` → `mis-finanzas-v1.6`
 
 Si no lo haces, el móvil seguirá usando la versión antigua guardada.
 La versión que está abierta se ve abajo en la pantalla de bloqueo y al final de Inicio.
