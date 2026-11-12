@@ -5,6 +5,7 @@ import { loadVault, saveVault, clearVault } from './storage.js';
 import { newState, migrate, runRecurring } from './model.js';
 import { initViews, render, go, resetNav, editTx } from './views.js';
 import { toast, closeAllSheets, confirmDialog } from './forms.js';
+import { VERSION } from './version.js';
 import { bioSupported, bioRecord, bioDisable, bioCreate, bioFinish, bioUnlock } from './bio.js';
 
 const MIN_PW = 8;
@@ -16,6 +17,9 @@ const app = {
   suspendLock: false,
   bioSupported: bioSupported(),
   bioEnabled: false, // ¿está activado Face ID?
+  version: VERSION,
+  updateReady: false, // ¿hay una versión nueva ya descargada?
+  applyUpdate,
   enableBio, disableBio,
   save, saveNow, lock, exportBackup, restoreBackup, changePassword, wipe, pickFile, saveFile, applyTheme,
   runRecurring: () => runRecurring(app.state),
@@ -304,6 +308,25 @@ async function saveFile(filename, text, mime) {
   }
 }
 
+// ---------- Versión y actualizaciones ----------
+// Si el móvil ya ha descargado una versión distinta de la que está en pantalla,
+// mostramos un botón para cargarla.
+async function checkUpdate() {
+  try {
+    const keys = await caches.keys();
+    const ready = keys.some((k) => k.startsWith('mis-finanzas-v') && k !== 'mis-finanzas-v' + VERSION);
+    if (ready === app.updateReady) return;
+    app.updateReady = ready;
+    $('#update-btn').hidden = !ready;
+    if (app.state) render();
+  } catch { /* sin acceso a la caché: no pasa nada */ }
+}
+
+async function applyUpdate() {
+  await saveNow();
+  location.reload();
+}
+
 // ---------- Eventos ----------
 let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
@@ -312,6 +335,7 @@ document.addEventListener('visibilitychange', () => {
     if (saveTimer) saveNow(); // guarda al instante al salir de la app
     if (app.key && !app.suspendLock && app.state.settings.autoLockMin === 0) lock();
   } else {
+    checkUpdate();
     if (app.suspendLock) { app.suspendLock = false; return; }
     if (app.key && hiddenAt && Date.now() - hiddenAt >= app.state.settings.autoLockMin * 60000) lock();
   }
@@ -319,6 +343,8 @@ document.addEventListener('visibilitychange', () => {
 
 $('#lock-form').addEventListener('submit', onLockSubmit);
 $('#bio-btn').addEventListener('click', onBioClick);
+$('#update-btn').addEventListener('click', applyUpdate);
+$('#version-label').textContent = 'Versión ' + VERSION;
 $('#restore-btn').addEventListener('click', async () => {
   const f = await pickFile('.json,application/json');
   app.suspendLock = false;
@@ -345,5 +371,7 @@ async function boot() {
   catch { $('#lock-msg').textContent = 'No se puede acceder al almacenamiento del navegador. ¿Estás en navegación privada?'; $('#lock-form').hidden = true; return; }
   try { app.bioEnabled = !!(vault && (await bioRecord())); } catch { app.bioEnabled = false; }
   showLock(vault ? 'unlock' : 'setup');
+  checkUpdate();
+  setTimeout(checkUpdate, 5000); // la descarga de una versión nueva tarda unos segundos
 }
 boot();

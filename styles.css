@@ -183,3 +183,7 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
 .lg::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--good); }
 .lg.expense::before { background: #8e8e93; }
 .lg.income, .lg.expense { color: var(--muted); }
+
+/* ---------- Versión ---------- */
+.version { text-align: center; color: var(--muted); font-size: .75rem; margin: 18px 0 0; }
+.banner.update { color: var(--accent); }

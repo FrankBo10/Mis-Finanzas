@@ -68,7 +68,11 @@ export function openForm({ title, intro, fields, values = {}, onSave, onDelete, 
         class: money ? 'money-input' : null,
       });
       const v = vals[f.key];
-      input.value = money ? (v != null ? centsToInput(v) : '') : v ?? '';
+      // Si el importe es 0 dejamos la casilla vacía (se ve "0,00" en gris como pista),
+      // así al escribir no se mezcla lo tecleado con un "0,00" ya puesto.
+      input.value = money ? (v ? centsToInput(v) : '') : v ?? '';
+      // Al tocar una casilla de importe que ya tiene valor, se selecciona entero para sustituirlo al escribir.
+      if (money) input.addEventListener('focus', () => setTimeout(() => { try { input.setSelectionRange(0, input.value.length); } catch { /* sin selección */ } }, 0));
     }
     const row = h(f.type === 'seg' ? 'div' : 'label', { class: 'field' },
       h('span', { class: 'field-label' }, f.label), input, f.hint && h('span', { class: 'field-hint' }, f.hint));

@@ -86,6 +86,7 @@ function homeView() {
         h('div', null, h('span', null, `Ingresos de ${monthLabel(ym, true).toLowerCase()}`), h('b', { class: 'income' }, '+' + fmt(mt.income))),
         h('div', null, h('span', null, 'Gastos'), h('b', { class: 'expense' }, '−' + fmt(mt.expense))),
         h('div', null, h('span', null, 'Balance'), h('b', null, fmt(mt.net))))),
+    app.updateReady && h('button', { type: 'button', class: 'banner update', onclick: () => app.applyUpdate() }, 'Hay una versión nueva descargada. Toca aquí para actualizar.'),
     needBackup && h('button', { type: 'button', class: 'banner', onclick: () => go('more', 'data') },
       last ? '⚠️ Hace más de 30 días de tu última copia de seguridad. Toca aquí para hacer una.' : '⚠️ Aún no has hecho ninguna copia de seguridad. Si pierdes el móvil, pierdes los datos. Toca aquí.'),
     card('Cuentas', active.length ? active.map((a) => h('button', { type: 'button', class: 'row', onclick: () => { nav.filterAcc = a.id; nav.search = ''; go('tx'); } },
@@ -97,7 +98,8 @@ function homeView() {
       h('span', { class: 'ico' }, '🔁'),
       h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, r.note || recurringTitle(r)), h('span', { class: 'row-sub' }, shortDate(r.nextDate))),
       h('span', { class: 'amt ' + r.type }, fmt(r.amount))))) : null,
-    card('Últimos movimientos', recent.length ? recent.map(txRow) : empty('Todavía no hay movimientos. Pulsa el botón + para añadir el primero.')));
+    card('Últimos movimientos', recent.length ? recent.map(txRow) : empty('Todavía no hay movimientos. Pulsa el botón + para añadir el primero.')),
+    h('p', { class: 'version' }, 'Mis Finanzas · versión ' + app.version));
 }
 
 // ================= MOVIMIENTOS =================
@@ -633,7 +635,7 @@ function aboutView() {
       p('• No hay cuenta, ni servidor, ni anuncios, ni rastreadores, ni conexión con bancos.'),
       p('• La app tiene bloqueadas por diseño las conexiones a internet: no puede enviar tus datos a ningún sitio.'),
       p('• Nadie puede recuperar tu contraseña. Guárdala bien y haz copias de seguridad.')),
-    card('Versión', p('Mis Finanzas 1.0')));
+    card('Versión', p('Mis Finanzas ' + app.version)));
 }
 
 const TABS = { home: homeView, tx: txView, reports: reportsView, more: moreView };
