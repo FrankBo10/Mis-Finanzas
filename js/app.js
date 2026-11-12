@@ -19,7 +19,7 @@ const app = {
   bioEnabled: false, // ¿está activado Face ID?
   version: VERSION,
   updateReady: false, // ¿hay una versión nueva ya descargada?
-  applyUpdate,
+  applyUpdate, searchUpdate,
   enableBio, disableBio,
   save, saveNow, lock, exportBackup, restoreBackup, changePassword, wipe, pickFile, saveFile, applyTheme,
   runRecurring: () => runRecurring(app.state),
@@ -320,6 +320,31 @@ async function checkUpdate() {
     $('#update-btn').hidden = !ready;
     if (app.state) render();
   } catch { /* sin acceso a la caché: no pasa nada */ }
+}
+
+// Busca una versión nueva en internet (botón de "Privacidad y acerca de").
+// Devuelve un texto para mostrar; si encuentra una versión nueva, la instala y recarga la app.
+async function searchUpdate() {
+  if (!('serviceWorker' in navigator)) return 'Este navegador no permite actualizar desde aquí.';
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return 'La app aún no está instalada del todo. Ciérrala, ábrela y prueba otra vez.';
+  try { await reg.update(); } catch { return 'No se ha podido comprobar. ¿Tienes conexión a internet?'; }
+  const sw = reg.installing || reg.waiting;
+  if (sw && sw.state !== 'activated') {
+    // Hay versión nueva descargándose: esperamos a que termine (máximo 40 segundos).
+    const ok = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 40000);
+      sw.addEventListener('statechange', () => {
+        if (sw.state === 'activated') { clearTimeout(timer); resolve(true); }
+        else if (sw.state === 'redundant') { clearTimeout(timer); resolve(false); }
+      });
+    });
+    if (!ok) return 'La descarga de la versión nueva ha fallado. Prueba otra vez en un momento.';
+  }
+  await checkUpdate();
+  if (!app.updateReady) return 'Ya tienes la última versión (' + VERSION + ').';
+  await applyUpdate();
+  return 'Actualizando…';
 }
 
 async function applyUpdate() {

@@ -3,7 +3,7 @@
 //
 // IMPORTANTE: si cambias cualquier archivo de la app, sube este número
 // (y pon el mismo en js/version.js) para que los móviles descarguen la versión nueva.
-const CACHE = 'mis-finanzas-v1.3';
+const CACHE = 'mis-finanzas-v1.4';
 
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.webmanifest',
@@ -13,7 +13,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))) // 'reload' = descarga siempre de internet, no de la memoria del navegador
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {

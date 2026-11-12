@@ -635,7 +635,16 @@ function aboutView() {
       p('• No hay cuenta, ni servidor, ni anuncios, ni rastreadores, ni conexión con bancos.'),
       p('• La app tiene bloqueadas por diseño las conexiones a internet: no puede enviar tus datos a ningún sitio.'),
       p('• Nadie puede recuperar tu contraseña. Guárdala bien y haz copias de seguridad.')),
-    card('Versión', p('Mis Finanzas ' + app.version)));
+    card('Versión', p('Mis Finanzas ' + app.version),
+      h('button', { type: 'button', class: 'btn block', onclick: async (ev) => {
+        const btn = ev.currentTarget;
+        btn.disabled = true; btn.textContent = 'Buscando…';
+        let msg;
+        try { msg = await app.searchUpdate(); } catch { msg = 'No se ha podido comprobar.'; }
+        btn.disabled = false; btn.textContent = 'Buscar actualizaciones';
+        toast(msg);
+      } }, 'Buscar actualizaciones'),
+      h('p', { class: 'help' }, 'Necesita internet solo para descargar la versión nueva de la app. Tus datos no se envían ni se tocan.')));
 }
 
 const TABS = { home: homeView, tx: txView, reports: reportsView, more: moreView };
