@@ -1,6 +1,6 @@
 // Arranque de la app: pantalla de bloqueo, guardado cifrado, copias de seguridad.
 import { $, h, todayStr } from './util.js';
-import { KDF_ITER, deriveKey, encryptJSON, decryptJSON, randomBytes, toB64, fromB64 } from './crypto.js';
+import { KDF_ITER, deriveKey, encryptJSON, decryptJSON, randomBytes, toB64, fromB64, passwordStrength } from './crypto.js';
 import { loadVault, saveVault, clearVault } from './storage.js';
 import { newState, migrate, runRecurring, purgeTrash } from './model.js';
 import { initViews, render, go, resetNav, editTx } from './views.js';
@@ -8,7 +8,6 @@ import { toast, closeAllSheets, confirmDialog } from './forms.js';
 import { VERSION } from './version.js';
 import { bioSupported, bioRecord, bioDisable, bioCreate, bioFinish, bioUnlock } from './bio.js';
 
-const MIN_PW = 8;
 
 const app = {
   state: null,   // los datos, solo en memoria mientras la app está desbloqueada
@@ -19,7 +18,7 @@ const app = {
   bioEnabled: false, // ¿está activado Face ID?
   version: VERSION,
   updateReady: false, // ¿hay una versión nueva ya descargada?
-  applyUpdate, searchUpdate,
+  applyUpdate, searchUpdate, passwordStrength,
   enableBio, disableBio,
   save, saveNow, lock, exportBackup, restoreBackup, changePassword, wipe, pickFile, saveFile, applyTheme,
   runRecurring: () => runRecurring(app.state),
@@ -68,6 +67,7 @@ function showLock(newMode) {
   $('#restore-info').textContent = '';
   $('#lock-btn').textContent = setup ? 'Crear y empezar' : 'Desbloquear';
   $('#lock-error').hidden = true;
+  $('#pw-meter').hidden = true;
   $('#bio-btn').hidden = setup || !app.bioEnabled || !app.bioSupported;
 }
 
@@ -207,7 +207,8 @@ async function onLockSubmit(ev) {
       if (restoreFile) {
         state = await readBackup(restoreFile, pw);
       } else {
-        if (pw.length < MIN_PW) return fail(`La contraseña debe tener al menos ${MIN_PW} caracteres.`);
+        const st = passwordStrength(pw);
+        if (st.score === 0) return fail(`${st.label}. ${st.tip}`);
         if (pw !== $('#pw2').value) return fail('Las dos contraseñas no coinciden.');
         state = newState();
       }
@@ -369,6 +370,14 @@ document.addEventListener('visibilitychange', () => {
 
 $('#lock-form').addEventListener('submit', onLockSubmit);
 $('#bio-btn').addEventListener('click', onBioClick);
+// Medidor de fortaleza mientras escribes la contraseña nueva (solo al crearla).
+$('#pw').addEventListener('input', () => {
+  const m = $('#pw-meter');
+  const st = passwordStrength($('#pw').value);
+  m.hidden = mode !== 'setup' || !!restoreFile || !st.label;
+  m.dataset.score = st.score;
+  $('#pw-meter-text').textContent = `${st.label}. ${st.tip}`;
+});
 $('#update-btn').addEventListener('click', applyUpdate);
 $('#version-label').textContent = 'Versión ' + VERSION;
 $('#restore-btn').addEventListener('click', async () => {

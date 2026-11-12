@@ -64,7 +64,7 @@ assert.equal(S2.tx.find((t) => t.note.includes('pan')).note, 'pan; "integral"');
 const bankRows = parseCSV('Fecha,Concepto,Importe\n03/11/2026,"MERCADONA, S.A.","-45,30"\n04/11/2026,Nomina,"1.200,00"\nmal,fila,x\n');
 const S3 = newState();
 const res = importGenericCSV(S3, bankRows, { dateCol: 0, amountCol: 2, descCol: 1, catCol: -1, accountId: S3.accounts[0].id });
-assert.deepEqual(res, { added: 2, skipped: 0, errors: 1 });
+assert.deepEqual(res, { added: 2, skipped: 0, errors: 1, auto: 0 });
 assert.equal(balances(S3).get(S3.accounts[0].id), 120000 - 4530);
 
 console.log('Todas las pruebas han pasado ✔');
@@ -122,4 +122,60 @@ import { txParts, byCategory, spentInCategory, runningBalances, byTag, parseTags
   runRecurring(T, '2026-11-06');
   assert.equal(T.tx.at(-1).fee, 50);
   console.log('Pruebas de la versión 1.5 superadas ✔');
+}
+
+// ---------- Versión 1.6: pendientes, periodos, reglas, arrastre de presupuesto, contraseña ----------
+import { isPending, budgetStatus, ruleCategory, applyRules, txOfCategory } from '../js/model.js';
+import { passwordStrength } from '../js/crypto.js';
+{
+  const P = newState();
+  const [acc] = P.accounts; acc.initial = 100000;
+  const [food, rest] = P.categories;
+  const TODAY = '2026-11-12';
+  const add = (id, date, amount, cat, note = '') => P.tx.push({ id, ts: P.tx.length, type: 'expense', amount, accountId: acc.id, categoryId: cat, date, note });
+  add('sep', '2026-09-10', 3000, food.id);
+  add('oct', '2026-10-10', 12000, food.id);
+  add('nov', '2026-11-05', 4000, food.id);
+  add('fut', '2026-11-20', 7000, food.id); // pendiente
+  add('old', '2025-12-31', 1000, rest.id);
+  // pendientes: no cuentan hasta su fecha
+  assert.ok(isPending(P.tx[3], TODAY) && !isPending(P.tx[2], TODAY));
+  assert.equal(balances(P, TODAY).get(acc.id), 100000 - 3000 - 12000 - 4000 - 1000);
+  assert.equal(balances(P, '2026-11-20').get(acc.id), 100000 - 27000); // el día 20 ya cuenta
+  assert.equal(monthTotals(P, '2026-11', TODAY).expense, 4000);
+  assert.equal(runningBalances(P, acc.id, TODAY).has('fut'), false);
+  assert.equal(netWorthSeries(P, '2026-11', 1, TODAY)[0].value, 80000);
+  // periodos: año y rango de fechas
+  assert.equal(monthTotals(P, '2026', TODAY).expense, 19000);
+  assert.equal(monthTotals(P, '2025', TODAY).expense, 1000);
+  assert.equal(monthTotals(P, { from: '2026-10-01', to: '2026-11-05' }, TODAY).expense, 16000);
+  assert.equal(byCategory(P, '2026', 'expense', TODAY)[0].total, 19000);
+  assert.deepEqual(txOfCategory(P, '2026', 'expense', food.id, TODAY).map((t) => t.id), ['sep', 'oct', 'nov']);
+  // presupuesto con arrastre: 100 al mes desde septiembre
+  const bud = { id: 'b', categoryId: food.id, amount: 10000, rollover: true, since: '2026-09' };
+  // sep sobran 70, oct faltan 20 -> en noviembre hay 100 + 50 = 150
+  assert.deepEqual(budgetStatus(P, bud, '2026-11', TODAY), { spent: 4000, carry: 5000, limit: 15000 });
+  assert.deepEqual(budgetStatus(P, { ...bud, rollover: false }, '2026-11', TODAY), { spent: 4000, carry: 0, limit: 10000 });
+  assert.deepEqual(budgetStatus(P, bud, '2026-09', TODAY), { spent: 3000, carry: 0, limit: 10000 });
+  // reglas de categorías
+  P.rules.push({ id: 'r1', text: 'mercadona', categoryId: food.id }, { id: 'r2', text: 'bar ', categoryId: rest.id });
+  assert.equal(ruleCategory(P, 'COMPRA MERCADONA 1234', 'expense'), food.id);
+  assert.equal(ruleCategory(P, 'MERCADONA', 'income'), null); // la regla es de gasto
+  assert.equal(ruleCategory(P, 'otra cosa', 'expense'), null);
+  add('u1', '2026-11-01', 500, null, 'Bar Pepe');
+  add('u2', '2026-11-01', 500, null, 'sin regla');
+  assert.equal(applyRules(P), 1);
+  assert.equal(P.tx.find((t) => t.id === 'u1').categoryId, rest.id);
+  const R = newState();
+  R.rules.push({ id: 'r', text: 'mercadona', categoryId: R.categories[0].id });
+  const rr = importGenericCSV(R, parseCSV('Fecha,Concepto,Importe\n03/11/2026,"MERCADONA, S.A.","-45,30"\n04/11/2026,Otro,"-1,00"\n'), { dateCol: 0, amountCol: 2, descCol: 1, catCol: -1, accountId: R.accounts[0].id });
+  assert.deepEqual(rr, { added: 2, skipped: 0, errors: 0, auto: 1 });
+  assert.equal(R.tx[0].categoryId, R.categories[0].id);
+  // contraseñas
+  for (const bad of ['12345678', 'password', 'aaaaaaaa', 'abcdefgh', '87654321', '19900101', 'corta']) assert.equal(passwordStrength(bad).score, 0, bad);
+  assert.equal(passwordStrength('gatoazul').score, 1);
+  assert.equal(passwordStrength('gato azul 7').score, 2);
+  assert.equal(passwordStrength('mi frase secreta 1').score, 3);
+  assert.equal(passwordStrength('otra clave nueva 2').score, 3);
+  console.log('Pruebas de la versión 1.6 superadas ✔');
 }

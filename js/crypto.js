@@ -48,3 +48,27 @@ export function fromB64(str) {
   for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
   return out;
 }
+
+// ---------- Fortaleza de la contraseña ----------
+// Valoración orientativa (no es infalible). score: 0 = muy débil (no se acepta),
+// 1 = débil, 2 = aceptable, 3 = fuerte.
+const COMMON = ['12345678', '123456789', '1234567890', '87654321', 'password', 'password1', 'contraseña', 'contrasena',
+  'qwertyui', 'qwertyuiop', 'qwerty123', 'asdfghjk', 'abcd1234', 'abc12345', 'iloveyou', 'tequiero', '11111111', '00000000',
+  'misfinanzas', 'mis finanzas', 'finanzas'];
+
+export function passwordStrength(pw) {
+  const res = (score, label, tip) => ({ score, label, tip });
+  if (!pw) return res(0, '', '');
+  const low = pw.toLowerCase();
+  if (pw.length < 8) return res(0, 'Muy corta', 'Necesita al menos 8 caracteres.');
+  if (COMMON.includes(low) || COMMON.some((c) => low === c + c)) return res(0, 'Muy débil', 'Es una de las contraseñas más usadas: se adivina al instante.');
+  if (new Set(pw).size < 4) return res(0, 'Muy débil', 'Repite casi siempre los mismos caracteres.');
+  const codes = Array.from(pw, (ch) => ch.charCodeAt(0));
+  const steps = codes.slice(1).map((c, i) => c - codes[i]);
+  if (steps.every((d) => d === 1) || steps.every((d) => d === -1)) return res(0, 'Muy débil', 'Es una secuencia seguida (como 12345678 o abcdefgh).');
+  if (/^\d+$/.test(pw) && pw.length < 12) return res(0, 'Muy débil', 'Solo números y pocos: se puede adivinar probando. Añade letras o hazla más larga.');
+  const classes = [/[a-zñáéíóúü]/, /[A-ZÑÁÉÍÓÚÜ]/, /\d/, /[^A-Za-z0-9ñÑáéíóúüÁÉÍÓÚÜ]/].filter((re) => re.test(pw)).length;
+  if (pw.length >= 16 || (pw.length >= 12 && classes >= 2)) return res(3, 'Fuerte', 'Buena contraseña.');
+  if (pw.length >= 12 || (pw.length >= 10 && classes >= 2) || classes >= 3) return res(2, 'Aceptable', 'Para que sea fuerte, hazla más larga: una frase de varias palabras funciona muy bien.');
+  return res(1, 'Débil', 'Hazla más larga o mezcla letras, números y símbolos. Una frase de varias palabras es lo mejor.');
+}

@@ -3,15 +3,17 @@ import { h, $, uid, todayStr, addMonthsYm, monthLabel, dayLabel, shortDate, mone
 import {
   balances, monthTotals, byCategory, spentInCategory, netWorthSeries, toCSV, parseCSV, isOwnCSV, importOwnCSV,
   importGenericCSV, PALETTE, ACCOUNT_TYPES, ACCOUNT_ICONS, txParts, runningBalances, allTags, parseTags, byTag, TRASH_DAYS,
+  isPending, budgetStatus, applyRules, txOfCategory, FEE_CATEGORY,
 } from './model.js';
 import { donut, bars, line } from './charts.js';
 import { openForm, openSheet, toast, confirmDialog } from './forms.js';
 
 let app;
-const nav = { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '', filterTag: '', repKind: 'expense' };
+const nav = { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '', filterTag: '', filterCat: '', repKind: 'expense',
+  repMode: 'month', repYear: todayStr().slice(0, 4), repFrom: todayStr().slice(0, 8) + '01', repTo: todayStr() };
 
 export function initViews(a) { app = a; }
-export function resetNav() { Object.assign(nav, { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '', filterTag: '' }); }
+export function resetNav() { Object.assign(nav, { tab: 'home', sub: null, month: todayStr().slice(0, 7), search: '', filterAcc: '', filterTag: '', filterCat: '' }); }
 export function go(tab, sub = null) { nav.tab = tab; nav.sub = sub; render(); window.scrollTo(0, 0); }
 
 export function render() {
@@ -57,6 +59,7 @@ function txRow(t, saldo, onclick) {
     t.note,
     (t.tags || []).map((x) => '#' + x).join(' '),
     t.recurringId && '🔁',
+    isPending(t) && '⏳ pendiente',
   ].filter(Boolean).join(' · ');
   const sign = t.type === 'expense' ? '−' : t.type === 'income' ? '+' : '';
   return h('button', { type: 'button', class: 'row', onclick: onclick || (() => editTx(t)) },
@@ -74,13 +77,55 @@ function progress(pct) {
 }
 
 function budgetRow(b, ym) {
-  const c = app.state.categories.find((x) => x.id === b.categoryId);
+  const c = catOf(b.categoryId);
   if (!c) return null;
-  const spent = spentInCategory(app.state, ym, c.id);
+  const st = budgetStatus(app.state, b, ym);
+  const carry = st.carry > 0 ? ` · incluye ${fmt(st.carry)} que sobraron de meses anteriores`
+    : st.carry < 0 ? ` · se han restado ${fmt(-st.carry)} por pasarte en meses anteriores` : '';
   return h('button', { type: 'button', class: 'stack-row', onclick: () => editBudget(b) },
-    h('div', { class: 'split' }, h('span', null, `${c.icon} ${c.name}`), h('span', null, `${fmt(spent)} / ${fmt(b.amount)}`)),
-    progress(b.amount ? spent / b.amount : 0),
-    h('div', { class: 'row-sub' }, spent > b.amount ? `Te has pasado ${fmt(spent - b.amount)}` : `Te quedan ${fmt(b.amount - spent)}`));
+    h('div', { class: 'split' }, h('span', null, `${c.icon} ${c.name}`), h('span', null, `${fmt(st.spent)} / ${fmt(st.limit)}`)),
+    progress(st.limit > 0 ? st.spent / st.limit : st.spent > 0 ? 2 : 0),
+    h('div', { class: 'row-sub wrap' }, (st.spent > st.limit ? `Te has pasado ${fmt(st.spent - st.limit)}` : `Te quedan ${fmt(st.limit - st.spent)}`) + carry));
+}
+
+// Fila del presupuesto total del mes (todos los gastos juntos).
+function totalBudgetRow(ym) {
+  const S = app.state, limit = S.settings.totalBudget;
+  if (!limit) return null;
+  const spent = monthTotals(S, ym).expense;
+  return h('button', { type: 'button', class: 'stack-row', onclick: editTotalBudget },
+    h('div', { class: 'split' }, h('b', null, 'Total del mes'), h('span', null, `${fmt(spent)} / ${fmt(limit)}`)),
+    progress(spent / limit),
+    h('div', { class: 'row-sub' }, spent > limit ? `Te has pasado ${fmt(spent - limit)}` : `Te quedan ${fmt(limit - spent)}`));
+}
+
+function editTotalBudget() {
+  const S = app.state.settings;
+  openForm({
+    title: 'Presupuesto total',
+    intro: 'Un límite para todos tus gastos del mes juntos. Déjalo vacío si no quieres usarlo.',
+    values: { v: S.totalBudget },
+    fields: [{ key: 'v', label: 'Límite total al mes', type: 'money', autofocus: true }],
+    onSave: (o) => { S.totalBudget = o.v > 0 ? o.v : null; changed(); },
+  });
+}
+
+// Crea un movimiento con fecha de hoy a partir de una plantilla.
+function useTemplate(tp) {
+  const S = app.state;
+  const has = (id) => S.accounts.some((a) => a.id === id && !a.archived);
+  if (!has(tp.accountId) || (tp.type === 'transfer' && !has(tp.toAccountId))) return toast('La cuenta de esta plantilla ya no existe. Edita la plantilla en Más → Plantillas.');
+  const t = {
+    id: uid(), ts: Date.now(), type: tp.type, amount: tp.amount, accountId: tp.accountId, date: todayStr(), note: tp.note || '',
+    toAccountId: tp.type === 'transfer' ? tp.toAccountId : null, fee: null, splits: null,
+    categoryId: tp.type !== 'transfer' && catOf(tp.categoryId) ? tp.categoryId : null, tags: [...(tp.tags || [])],
+  };
+  S.tx.push(t);
+  changed();
+  toast(`Apuntado: ${tp.name} · ${fmt(tp.amount)}`, { action: 'Deshacer', onAction: () => {
+    const T = app.state, i = T.tx.indexOf(t);
+    if (i >= 0) { T.tx.splice(i, 1); changed(); }
+  } });
 }
 
 // ================= INICIO =================
@@ -91,8 +136,9 @@ function homeView() {
   const mt = monthTotals(S, ym);
   const last = S.settings.lastBackupAt;
   const needBackup = S.tx.length >= 5 && (!last || Date.now() - last > 30 * 864e5);
-  const recent = [...S.tx].sort((a, b) => b.date.localeCompare(a.date) || (b.ts || 0) - (a.ts || 0)).slice(0, 6);
+  const recent = S.tx.filter((t) => !isPending(t, today)).sort((a, b) => b.date.localeCompare(a.date) || (b.ts || 0) - (a.ts || 0)).slice(0, 6);
   const upcoming = S.recurring.filter((r) => r.active).sort((a, b) => a.nextDate.localeCompare(b.nextDate)).slice(0, 3);
+  const pending = S.tx.filter((t) => isPending(t, today)).sort((a, b) => a.date.localeCompare(b.date));
 
   return h('div', { class: 'page' },
     h('section', { class: 'hero' },
@@ -109,7 +155,11 @@ function homeView() {
       h('span', { class: 'ico' }, ACCOUNT_ICONS[a.type] || '👛'),
       h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, a.name)),
       h('span', { class: 'amt' + (bal.get(a.id) < 0 ? ' expense' : '') }, fmt(bal.get(a.id))))) : empty('No tienes cuentas. Créalas en Más → Cuentas.')),
-    S.budgets.length ? card('Presupuestos de este mes', S.budgets.map((b) => budgetRow(b, ym))) : null,
+    S.templates.length ? card('Plantillas · un toque para apuntar', h('div', { class: 'chips pad-chips' },
+      S.templates.map((tp) => h('button', { type: 'button', class: 'chip big', onclick: () => useTemplate(tp) }, `${tp.name} · ${fmt(tp.amount)}`)))) : null,
+    S.budgets.length || S.settings.totalBudget ? card('Presupuestos de este mes', totalBudgetRow(ym), S.budgets.map((b) => budgetRow(b, ym))) : null,
+    pending.length ? card('Pendientes · aún no cuentan en el saldo', pending.slice(0, 5).map((t) => txRow(t)),
+      h('p', { class: 'help' }, (pending.length === 1 ? '1 movimiento' : `${pending.length} movimientos`) + ' con fecha futura. Contarán cuando llegue su día.')) : null,
     upcoming.length ? card('Próximos recurrentes', upcoming.map((r) => h('div', { class: 'row static' },
       h('span', { class: 'ico' }, '🔁'),
       h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, r.note || recurringTitle(r)), h('span', { class: 'row-sub' }, shortDate(r.nextDate))),
@@ -129,7 +179,8 @@ function txView() {
     const running = runningBalances(S, nav.filterAcc); // saldo acumulado tras cada movimiento
     let items = S.tx.filter((t) => (q || t.date.startsWith(nav.month))
       && (!nav.filterAcc || t.accountId === nav.filterAcc || t.toAccountId === nav.filterAcc)
-      && (!nav.filterTag || (t.tags || []).includes(nav.filterTag)));
+      && (!nav.filterTag || (t.tags || []).includes(nav.filterTag))
+      && (!nav.filterCat || (t.type !== 'transfer' && txParts(t).some((p) => (p.categoryId || '__none') === nav.filterCat))));
     if (q) {
       items = items.filter((t) => {
         const cats = txParts(t).map((p) => catOf(p.categoryId)?.name || '');
@@ -142,12 +193,12 @@ function txView() {
     if (shown.length) out.push(h('p', { class: 'help' }, nav.filterAcc
       ? `El número gris bajo cada importe es el saldo de ${accName(nav.filterAcc)} después de ese movimiento.`
       : 'El número gris bajo cada importe es tu patrimonio total después de ese movimiento.'));
-    else out.push(empty(q || nav.filterTag ? 'Ningún movimiento coincide.' : 'No hay movimientos en este mes.'));
+    else out.push(empty(q || nav.filterTag || nav.filterCat ? 'Ningún movimiento coincide.' : 'No hay movimientos en este mes.'));
     let day = null, box = null;
     for (const t of shown) {
       if (t.date !== day) {
         day = t.date;
-        const net = items.filter((x) => x.date === day).reduce((s, x) => s + (x.type === 'income' ? x.amount : x.type === 'expense' ? -x.amount : -(x.fee || 0)), 0);
+        const net = items.filter((x) => x.date === day && !isPending(x)).reduce((s, x) => s + (x.type === 'income' ? x.amount : x.type === 'expense' ? -x.amount : -(x.fee || 0)), 0);
         box = h('section', { class: 'card' }, h('div', { class: 'split day-head' }, h('span', null, dayLabel(day)), h('span', null, fmt(net))));
         out.push(box);
       }
@@ -164,8 +215,12 @@ function txView() {
   const tagSel = tags.length ? h('select', { 'aria-label': 'Filtrar por etiqueta', onchange: () => { nav.filterTag = tagSel.value; fill(); } },
     h('option', { value: '' }, 'Todas las etiquetas'), tags.map((x) => h('option', { value: x }, '#' + x))) : null;
   if (tagSel) tagSel.value = nav.filterTag;
+  if (nav.filterCat && nav.filterCat !== '__none' && !catOf(nav.filterCat)) nav.filterCat = '';
+  const catSel = h('select', { 'aria-label': 'Filtrar por categoría', onchange: () => { nav.filterCat = catSel.value; fill(); } },
+    h('option', { value: '' }, 'Todas las categorías'), S.categories.map((c) => h('option', { value: c.id }, `${c.icon} ${c.name}`)), h('option', { value: '__none' }, 'Sin categoría'));
+  catSel.value = nav.filterCat;
   fill();
-  return page('Movimientos', monthNav(), h('div', { class: 'filters' }, search, accSel, tagSel), list);
+  return page('Movimientos', monthNav(), h('div', { class: 'filters' }, search, accSel, catSel, tagSel), list);
 }
 
 // Manda un movimiento a la papelera (se puede recuperar durante 30 días).
@@ -230,14 +285,16 @@ function openSplitEditor({ kind, total, splits, categoryId }, onDone) {
   });
 }
 
-export function editTx(t) {
+export function editTx(t, preset) {
   const S = app.state, isNew = !t;
   const accs = S.accounts.filter((a) => !a.archived || (t && (a.id === t.accountId || a.id === t.toAccountId))).map((a) => [a.id, a.name]);
   if (!accs.length) return toast('Primero crea una cuenta en Más → Cuentas');
   const values = t
     ? { ...t, categoryId: t.categoryId ?? '', splits: t.splits ? t.splits.map((p) => ({ ...p })) : null, tagsText: (t.tags || []).join(', ') }
-    : { type: 'expense', date: todayStr(), accountId: S.settings.lastAccountId, note: '', splits: null, tagsText: '' };
-  if (isNew) values.toAccountId = accs.find(([id]) => id !== (values.accountId || accs[0][0]))?.[0];
+    : { type: 'expense', date: todayStr(), accountId: S.settings.lastAccountId, note: '', splits: null, tagsText: '', ...(preset || {}) };
+  if (isNew && preset?.toAccountId) {
+    if (!values.accountId || values.accountId === preset.toAccountId) values.accountId = accs.find(([id]) => id !== preset.toAccountId)?.[0];
+  } else if (isNew) values.toAccountId = accs.find(([id]) => id !== (values.accountId || accs[0][0]))?.[0];
   const known = allTags(S);
   openForm({
     title: isNew ? 'Nuevo movimiento' : 'Editar movimiento',
@@ -305,43 +362,77 @@ export function editTx(t) {
       close();
       S.tx.push({ ...JSON.parse(JSON.stringify(t)), id: uid(), ts: Date.now(), date: todayStr(), recurringId: null });
       changed(); toast('Movimiento duplicado');
+    } }, { label: 'Guardar como plantilla', onClick: (close) => {
+      close();
+      const cat = catOf(t.categoryId);
+      editTemplate(null, { name: t.note || cat?.name || (t.type === 'transfer' ? 'Transferencia' : 'Plantilla'), type: t.type, amount: t.amount,
+        categoryId: t.categoryId ?? '', accountId: t.accountId, toAccountId: t.toAccountId, note: t.note || '', tags: [...(t.tags || [])] });
     } }],
   });
 }
 
 // ================= INFORMES =================
 function reportsView() {
-  const S = app.state, ym = nav.month, kind = nav.repKind;
-  const mt = monthTotals(S, ym), prev = monthTotals(S, addMonthsYm(ym, -1));
-  const cats = byCategory(S, ym, kind);
+  const S = app.state, kind = nav.repKind, mode = nav.repMode;
+  // Periodo elegido, periodo anterior (para comparar) y su nombre.
+  let per, prev = null, prevName = '', title, endYm;
+  if (mode === 'year') { per = nav.repYear; prev = String(Number(per) - 1); prevName = 'al año anterior'; title = 'Año ' + per; endYm = per + '-12'; }
+  else if (mode === 'range') {
+    if (nav.repFrom > nav.repTo) [nav.repFrom, nav.repTo] = [nav.repTo, nav.repFrom];
+    per = { from: nav.repFrom, to: nav.repTo }; title = `${shortDate(nav.repFrom)} – ${shortDate(nav.repTo)}`; endYm = nav.repTo.slice(0, 7);
+  } else { per = nav.month; prev = addMonthsYm(per, -1); prevName = 'al mes anterior'; title = monthLabel(per); endYm = per; }
+  const mt = monthTotals(S, per), pv = prev ? monthTotals(S, prev) : null;
+  const cats = byCategory(S, per, kind);
   const total = cats.reduce((s, c) => s + c.total, 0);
-  const diff = (now, before) => (before ? `${now >= before ? '▲' : '▼'} ${Math.abs(Math.round(((now - before) / before) * 100))} % respecto al mes anterior` : 'Sin datos del mes anterior');
-  const seg = h('div', { class: 'seg' }, [['expense', 'Gastos'], ['income', 'Ingresos']].map(([v, l]) =>
-    h('button', { type: 'button', class: v === kind ? 'on' : '', onclick: () => { nav.repKind = v; render(); } }, l)));
-  const months = Array.from({ length: 6 }, (_, i) => addMonthsYm(ym, i - 5)).map((m) => ({ ym: m, ...monthTotals(S, m) }));
+  const diff = (now, before) => (!pv ? '' : before ? `${now >= before ? '▲' : '▼'} ${Math.abs(Math.round(((now - before) / before) * 100))} % respecto ${prevName}` : 'Sin datos del periodo anterior');
+  const segBtn = (cur, set, opts) => h('div', { class: 'seg' }, opts.map(([v, l]) => h('button', { type: 'button', class: v === cur ? 'on' : '', onclick: () => { set(v); render(); } }, l)));
+  const yearMove = (n) => () => { nav.repYear = String(Number(nav.repYear) + n); render(); };
+  const dateInput = (key, label) => {
+    const el = h('input', { type: 'date', 'aria-label': label, onchange: () => { if (el.value) { nav[key] = el.value; render(); } } });
+    el.value = nav[key];
+    return h('label', { class: 'field' }, h('span', { class: 'field-label' }, label), el);
+  };
+  const periodNav = mode === 'year'
+    ? h('div', { class: 'month-nav' }, h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Año anterior', onclick: yearMove(-1) }, '‹'),
+      h('strong', null, 'Año ' + nav.repYear), h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Año siguiente', onclick: yearMove(1) }, '›'))
+    : mode === 'range' ? h('div', { class: 'grid2' }, dateInput('repFrom', 'Desde'), dateInput('repTo', 'Hasta'))
+    : monthNav();
+  const months = mode === 'year'
+    ? Array.from({ length: 12 }, (_, i) => `${per}-${String(i + 1).padStart(2, '0')}`)
+    : Array.from({ length: 6 }, (_, i) => addMonthsYm(endYm, i - 5));
+  const monthData = months.map((m) => ({ ym: m, ...monthTotals(S, m) }));
+  const tg = byTag(S, per);
 
-  return page('Informes', monthNav(),
+  // Al tocar una categoría se abre la lista de sus movimientos en ese periodo.
+  const openCategory = (c) => {
+    const items = txOfCategory(S, per, kind, c.cat.id).sort((a, b) => b.date.localeCompare(a.date) || (b.ts || 0) - (a.ts || 0));
+    const sheet = openSheet({ title: c.cat.name, cancelLabel: 'Cerrar', body: h('div', { class: 'form-body' },
+      h('p', { class: 'form-intro' }, `${title} · ${items.length} movimientos · ${fmt(c.total)}`),
+      h('section', { class: 'card' }, items.map((t) => txRow(t, null, () => { sheet.close(); editTx(t); })))) });
+  };
+
+  return page('Informes',
+    segBtn(mode, (v) => { nav.repMode = v; }, [['month', 'Mes'], ['year', 'Año'], ['range', 'Fechas']]),
+    h('div', { class: 'gap' }), periodNav,
     h('div', { class: 'grid2' },
-      h('section', { class: 'card stat' }, h('span', null, 'Ingresos'), h('b', { class: 'income' }, fmt(mt.income)), h('small', null, diff(mt.income, prev.income))),
-      h('section', { class: 'card stat' }, h('span', null, 'Gastos'), h('b', { class: 'expense' }, fmt(mt.expense)), h('small', null, diff(mt.expense, prev.expense)))),
-    card('Ahorro del mes', h('p', { class: 'big' + (mt.net < 0 ? ' expense' : ' income') }, fmt(mt.net)),
+      h('section', { class: 'card stat' }, h('span', null, 'Ingresos'), h('b', { class: 'income' }, fmt(mt.income)), pv && h('small', null, diff(mt.income, pv.income))),
+      h('section', { class: 'card stat' }, h('span', null, 'Gastos'), h('b', null, fmt(mt.expense)), pv && h('small', null, diff(mt.expense, pv.expense)))),
+    card('Ahorro del periodo', h('p', { class: 'big' + (mt.net < 0 ? ' expense' : ' income') }, fmt(mt.net)),
       mt.income > 0 && h('p', { class: 'row-sub' }, `Has ahorrado el ${Math.round((mt.net / mt.income) * 100)} % de tus ingresos.`)),
-    card('Por categorías', seg,
+    card('Por categorías', segBtn(kind, (v) => { nav.repKind = v; }, [['expense', 'Gastos'], ['income', 'Ingresos']]),
       total ? [donut(cats.map((c) => ({ color: c.cat.color, value: c.total })), kind === 'expense' ? 'Gastos' : 'Ingresos', fmt(total)),
         cats.map((c) => {
           const dot = h('span', { class: 'dot' }); dot.style.background = c.cat.color;
-          return h('div', { class: 'row static' }, dot,
+          return h('button', { type: 'button', class: 'row', onclick: () => openCategory(c) }, dot,
             h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, `${c.cat.icon} ${c.cat.name}`)),
-            h('span', { class: 'amt' }, fmt(c.total), h('small', null, ` ${Math.round((c.total / total) * 100)} %`)));
-        })] : empty('No hay datos en este mes.')),
-    (() => {
-      const tg = byTag(S, ym);
-      return tg.length ? card('Gastos por etiqueta', tg.map((x) => h('div', { class: 'row static' },
-        h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, '#' + x.tag)), h('span', { class: 'amt' }, fmt(x.total)))),
-        h('p', { class: 'help' }, 'Un movimiento con varias etiquetas cuenta en cada una.')) : null;
-    })(),
-    card('Últimos 6 meses', bars(months), h('p', { class: 'legend' }, h('span', { class: 'lg income' }, 'Ingresos'), h('span', { class: 'lg expense' }, 'Gastos'))),
-    card('Evolución del patrimonio (12 meses)', line(netWorthSeries(S, ym, 12))));
+            h('span', { class: 'amt' }, fmt(c.total), h('small', null, ` ${Math.round((c.total / total) * 100)} %`)), h('span', { class: 'chev' }, '›'));
+        }),
+        h('p', { class: 'help' }, 'Toca una categoría para ver sus movimientos.')] : empty('No hay datos en este periodo.')),
+    tg.length ? card('Gastos por etiqueta', tg.map((x) => h('div', { class: 'row static' },
+      h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, '#' + x.tag)), h('span', { class: 'amt' }, fmt(x.total)))),
+      h('p', { class: 'help' }, 'Un movimiento con varias etiquetas cuenta en cada una.')) : null,
+    card(mode === 'year' ? 'Mes a mes' : 'Últimos 6 meses', bars(monthData), h('p', { class: 'legend' }, h('span', { class: 'lg income' }, 'Ingresos'), h('span', { class: 'lg expense' }, 'Gastos'))),
+    card('Evolución del patrimonio (12 meses)', line(netWorthSeries(S, endYm, 12))));
 }
 
 // ================= MÁS =================
@@ -353,8 +444,10 @@ function moreView() {
     card(null,
       item('🏦', 'Cuentas', `${S.accounts.filter((a) => !a.archived).length} activas`, () => go('more', 'accounts')),
       item('🏷️', 'Categorías', null, () => go('more', 'categories')),
-      item('🎯', 'Presupuestos', 'Límite de gasto mensual por categoría', () => go('more', 'budgets')),
+      item('🎯', 'Presupuestos', 'Límite de gasto mensual, total y por categoría', () => go('more', 'budgets')),
       item('🔁', 'Recurrentes', 'Alquiler, nómina, suscripciones…', () => go('more', 'recurring')),
+      item('⚡', 'Plantillas', 'Movimientos frecuentes con un toque', () => go('more', 'templates')),
+      item('🪄', 'Reglas de categorías', 'Categoría automática al importar del banco', () => go('more', 'rules')),
       item('🐖', 'Metas de ahorro', null, () => go('more', 'goals')),
       item('🤝', 'Deudas y préstamos', null, () => go('more', 'debts'))),
     card(null,
@@ -439,6 +532,8 @@ function editCategory(c) {
       }
       for (const r of S.recurring) if (r.categoryId === c.id) r.categoryId = null;
       S.budgets = S.budgets.filter((b) => b.categoryId !== c.id);
+      S.rules = S.rules.filter((r) => r.categoryId !== c.id);
+      for (const tp of S.templates) if (tp.categoryId === c.id) tp.categoryId = null;
       S.categories.splice(S.categories.indexOf(c), 1); close(); changed();
     },
   });
@@ -449,9 +544,11 @@ function budgetsView() {
   const S = app.state, ym = todayStr().slice(0, 7);
   const totalB = S.budgets.reduce((s, b) => s + b.amount, 0);
   return subPage('Presupuestos',
-    h('p', { class: 'help' }, 'Pon un límite de gasto mensual a una categoría. La barra se pone naranja al 85 % y roja si te pasas.'),
-    card(S.budgets.length ? `Total presupuestado: ${fmt(totalB)} al mes` : null, S.budgets.length ? S.budgets.map((b) => budgetRow(b, ym)) : empty('No hay presupuestos todavía.')),
-    addBtn('+ Nuevo presupuesto', () => editBudget()));
+    h('p', { class: 'help' }, 'Pon un límite de gasto mensual. La barra se pone naranja al 85 % y roja si te pasas.'),
+    card('Todos los gastos juntos', totalBudgetRow(ym) || empty('Sin presupuesto total.'),
+      h('button', { type: 'button', class: 'btn small', onclick: editTotalBudget }, S.settings.totalBudget ? 'Cambiar presupuesto total' : 'Poner presupuesto total')),
+    card(S.budgets.length ? `Por categoría · suman ${fmt(totalB)} al mes` : 'Por categoría', S.budgets.length ? S.budgets.map((b) => budgetRow(b, ym)) : empty('No hay presupuestos por categoría.')),
+    addBtn('+ Nuevo presupuesto por categoría', () => editBudget()));
 }
 
 function editBudget(b) {
@@ -460,13 +557,100 @@ function editBudget(b) {
   if (!free.length) return toast('Todas las categorías de gasto ya tienen presupuesto');
   openForm({
     title: isNew ? 'Nuevo presupuesto' : 'Editar presupuesto',
-    values: b ? { ...b } : {},
+    values: b ? { ...b, rollover: b.rollover ? 'yes' : 'no' } : { rollover: 'no' },
     fields: [
       { key: 'categoryId', label: 'Categoría', type: 'select', options: free.map((c) => [c.id, `${c.icon} ${c.name}`]) },
       { key: 'amount', label: 'Límite mensual', type: 'money', required: true, positive: true, autofocus: isNew },
+      { key: 'rollover', label: 'Lo que sobre o falte al acabar el mes', type: 'select', options: [['no', 'No se arrastra: cada mes empieza de cero'], ['yes', 'Se arrastra al mes siguiente']],
+        hint: 'Con arrastre: si un mes te sobran 20 €, el siguiente tienes 20 € más; si te pasas 20 €, tienes 20 € menos. Empieza a contar desde el mes en que lo activas.' },
     ],
-    onSave: (o) => { if (isNew) S.budgets.push({ id: uid(), ...o }); else Object.assign(b, o); changed(); },
+    onSave: (o) => {
+      const rollover = o.rollover === 'yes';
+      const data = { categoryId: o.categoryId, amount: o.amount, rollover, since: rollover ? (b?.rollover && b.since) || todayStr().slice(0, 7) : null };
+      if (isNew) S.budgets.push({ id: uid(), ...data }); else Object.assign(b, data);
+      changed();
+    },
     onDelete: isNew ? null : (close) => { S.budgets.splice(S.budgets.indexOf(b), 1); close(); changed(); },
+  });
+}
+
+// ---------- Plantillas ----------
+function templatesView() {
+  const S = app.state;
+  const row = (tp) => h('button', { type: 'button', class: 'row', onclick: () => editTemplate(tp) },
+    h('span', { class: 'ico' }, tp.type === 'transfer' ? '↔️' : catOf(tp.categoryId)?.icon || '⚡'),
+    h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, tp.name),
+      h('span', { class: 'row-sub' }, tp.type === 'transfer' ? `${accName(tp.accountId)} → ${accName(tp.toAccountId)}` : `${catOf(tp.categoryId)?.name || 'Sin categoría'} · ${accName(tp.accountId)}`)),
+    h('span', { class: 'amt ' + tp.type }, fmt(tp.amount)));
+  return subPage('Plantillas',
+    h('p', { class: 'help' }, 'Movimientos que repites a menudo (un café, gasolina…). Aparecen en Inicio y con un toque quedan apuntados con la fecha de hoy. También puedes crear una desde un movimiento: ábrelo y pulsa "Guardar como plantilla".'),
+    card(null, S.templates.length ? S.templates.map(row) : empty('No hay plantillas todavía.')),
+    addBtn('+ Nueva plantilla', () => editTemplate()));
+}
+
+function editTemplate(tp, preset) {
+  const S = app.state, isNew = !tp;
+  const accs = S.accounts.filter((a) => !a.archived).map((a) => [a.id, a.name]);
+  if (!accs.length) return toast('Primero crea una cuenta');
+  const base = tp || preset;
+  openForm({
+    title: isNew ? 'Nueva plantilla' : 'Editar plantilla',
+    values: base ? { ...base, categoryId: base.categoryId ?? '' } : { type: 'expense', toAccountId: accs[1]?.[0], note: '' },
+    fields: [
+      { key: 'name', label: 'Nombre de la plantilla', required: true, placeholder: 'Ej.: Café', maxlength: 30, autofocus: isNew && !preset },
+      { key: 'type', label: 'Tipo', type: 'seg', options: [['expense', 'Gasto'], ['income', 'Ingreso'], ['transfer', 'Transferencia']] },
+      { key: 'amount', label: 'Importe', type: 'money', required: true, positive: true },
+      { key: 'categoryId', label: 'Categoría', type: 'select', showIf: (v) => v.type !== 'transfer',
+        options: (v) => [...S.categories.filter((c) => c.kind === v.type && !c.archived).map((c) => [c.id, `${c.icon} ${c.name}`]), ['', 'Sin categoría']] },
+      { key: 'accountId', label: 'Cuenta', type: 'select', options: accs },
+      { key: 'toAccountId', label: 'Cuenta destino', type: 'select', showIf: (v) => v.type === 'transfer', options: accs },
+      { key: 'note', label: 'Nota (opcional)', type: 'text' },
+    ],
+    validate: (o) => (o.type === 'transfer' && o.accountId === o.toAccountId ? 'La cuenta de origen y la de destino deben ser distintas.' : null),
+    onSave: (o) => {
+      const data = { ...o, note: o.note || '', tags: base?.tags || [] };
+      if (isNew) S.templates.push({ id: uid(), ...data }); else Object.assign(tp, data);
+      changed();
+      if (isNew) toast('Plantilla guardada. La tienes en Inicio.');
+    },
+    onDelete: isNew ? null : (close) => { S.templates.splice(S.templates.indexOf(tp), 1); close(); changed(); },
+  });
+}
+
+// ---------- Reglas de categorías ----------
+function rulesView() {
+  const S = app.state;
+  const row = (r) => {
+    const c = catOf(r.categoryId);
+    return h('button', { type: 'button', class: 'row', onclick: () => editRule(r) },
+      h('span', { class: 'ico' }, c?.icon || '❔'),
+      h('span', { class: 'row-main' }, h('span', { class: 'row-title' }, `Contiene "${r.text}"`), h('span', { class: 'row-sub' }, `→ ${c?.name || '(categoría eliminada)'} · ${c?.kind === 'income' ? 'ingresos' : 'gastos'}`)),
+      h('span', { class: 'chev' }, '›'));
+  };
+  return subPage('Reglas de categorías',
+    h('p', { class: 'help' }, 'Al importar el CSV del banco, si la descripción de un movimiento contiene el texto de una regla, se le pone esa categoría sola. Ejemplo: contiene "mercadona" → Comida. No distingue mayúsculas; si coinciden varias, gana la primera de la lista.'),
+    card(null, S.rules.length ? S.rules.map(row) : empty('No hay reglas todavía.')),
+    addBtn('+ Nueva regla', () => editRule()),
+    S.rules.length ? h('button', { type: 'button', class: 'btn block', onclick: () => {
+      const n = applyRules(S);
+      if (n) changed();
+      toast(n ? `Se ha puesto categoría a ${n} movimientos` : 'Ningún movimiento sin categoría coincide con las reglas');
+    } }, 'Aplicar ahora a los movimientos sin categoría') : null);
+}
+
+function editRule(r) {
+  const S = app.state, isNew = !r;
+  const cats = S.categories.filter((c) => !c.archived || c.id === r?.categoryId).map((c) => [c.id, `${c.icon} ${c.name} (${c.kind === 'income' ? 'ingreso' : 'gasto'})`]);
+  if (!cats.length) return toast('Primero crea una categoría');
+  openForm({
+    title: isNew ? 'Nueva regla' : 'Editar regla',
+    values: r ? { ...r } : {},
+    fields: [
+      { key: 'text', label: 'Si la descripción contiene…', required: true, placeholder: 'Ej.: mercadona', maxlength: 60, autofocus: isNew },
+      { key: 'categoryId', label: '…poner la categoría', type: 'select', options: cats },
+    ],
+    onSave: (o) => { if (isNew) S.rules.push({ id: uid(), ...o }); else Object.assign(r, o); changed(); },
+    onDelete: isNew ? null : (close) => { S.rules.splice(S.rules.indexOf(r), 1); close(); changed(); },
   });
 }
 
@@ -543,17 +727,29 @@ function editRecurring(r) {
 }
 
 // ---------- Metas ----------
+// Lo ahorrado en una meta: si está vinculada a una cuenta, es el saldo de esa cuenta.
+function goalSaved(g, bal) {
+  return g.accountId && bal.has(g.accountId) ? Math.max(0, bal.get(g.accountId)) : g.saved || 0;
+}
+
 function goalsView() {
-  const S = app.state;
-  const row = (g) => h('div', { class: 'stack-row static' },
-    h('div', { class: 'split' }, h('b', null, g.name), h('span', null, `${fmt(g.saved)} / ${fmt(g.target)}`)),
-    progressGoal(g.target ? g.saved / g.target : 0),
-    h('div', { class: 'row-sub' }, g.saved >= g.target ? '🎉 ¡Meta conseguida!' : `Faltan ${fmt(g.target - g.saved)}` + (g.deadline ? ` · fecha límite: ${shortDate(g.deadline)}` : '')),
-    h('div', { class: 'mini-btns' },
-      h('button', { type: 'button', class: 'btn small', onclick: () => contribute(g, 'saved', 'Aportar a la meta', 'Cantidad a añadir (negativa para retirar)') }, 'Aportar'),
-      h('button', { type: 'button', class: 'btn small', onclick: () => editGoal(g) }, 'Editar')));
+  const S = app.state, bal = balances(S);
+  const row = (g) => {
+    const linked = g.accountId && bal.has(g.accountId);
+    const saved = goalSaved(g, bal);
+    return h('div', { class: 'stack-row static' },
+      h('div', { class: 'split' }, h('b', null, g.name), h('span', null, `${fmt(saved)} / ${fmt(g.target)}`)),
+      progressGoal(g.target ? saved / g.target : 0),
+      h('div', { class: 'row-sub wrap' }, (saved >= g.target ? '🎉 ¡Meta conseguida!' : `Faltan ${fmt(g.target - saved)}`)
+        + (g.deadline ? ` · fecha límite: ${shortDate(g.deadline)}` : '') + (linked ? ` · es el saldo de la cuenta ${accName(g.accountId)}` : '')),
+      h('div', { class: 'mini-btns' },
+        h('button', { type: 'button', class: 'btn small', onclick: () => (linked
+          ? editTx(null, { type: 'transfer', toAccountId: g.accountId, note: `Ahorro: ${g.name}` })
+          : contribute(g, 'saved', 'Aportar a la meta', 'Cantidad a añadir (negativa para retirar)')) }, 'Aportar'),
+        h('button', { type: 'button', class: 'btn small', onclick: () => editGoal(g) }, 'Editar')));
+  };
   return subPage('Metas de ahorro',
-    h('p', { class: 'help' }, 'Apunta para qué ahorras y cuánto llevas. Es un contador aparte: no mueve dinero de tus cuentas.'),
+    h('p', { class: 'help' }, 'Apunta para qué ahorras. Si vinculas la meta a una cuenta (por ejemplo una de ahorro), lo ahorrado es el saldo de esa cuenta y "Aportar" crea una transferencia hacia ella. Sin cuenta vinculada es un contador que llevas a mano.'),
     card(null, S.goals.length ? S.goals.map(row) : empty('No hay metas todavía.')), addBtn('+ Nueva meta', () => editGoal()));
 }
 function progressGoal(pct) {
@@ -565,16 +761,23 @@ function progressGoal(pct) {
 function editGoal(g) {
   const S = app.state, isNew = !g;
   openForm({
-    title: isNew ? 'Nueva meta' : 'Editar meta', values: g ? { ...g } : { saved: 0 },
+    title: isNew ? 'Nueva meta' : 'Editar meta', values: g ? { ...g, accountId: g.accountId ?? '' } : { saved: 0, accountId: '' },
     fields: [
       { key: 'name', label: 'Nombre', required: true, placeholder: 'Ej.: Vacaciones', maxlength: 60, autofocus: isNew },
       { key: 'target', label: 'Objetivo', type: 'money', required: true, positive: true },
-      { key: 'saved', label: 'Ahorrado hasta ahora', type: 'money' },
+      { key: 'accountId', label: 'Cuenta vinculada', type: 'select',
+        options: [['', 'Ninguna: lo apunto a mano'], ...S.accounts.filter((a) => !a.archived || a.id === g?.accountId).map((a) => [a.id, a.name])],
+        hint: 'Si eliges una cuenta, lo ahorrado será siempre el saldo de esa cuenta.' },
+      { key: 'saved', label: 'Ahorrado hasta ahora', type: 'money', showIf: (v) => !v.accountId },
       { key: 'deadline', label: 'Fecha límite (opcional)', type: 'date' },
     ],
-    onSave: (o) => { o.saved = o.saved || 0; if (isNew) S.goals.push({ id: uid(), ...o }); else Object.assign(g, o); changed(); },
+    onSave: (o) => {
+      const data = { name: o.name, target: o.target, accountId: o.accountId || null, deadline: o.deadline || null, saved: o.accountId ? g?.saved || 0 : o.saved || 0 };
+      if (isNew) S.goals.push({ id: uid(), ...data }); else Object.assign(g, data);
+      changed();
+    },
     onDelete: isNew ? null : async (close) => {
-      if (!(await confirmDialog(`¿Eliminar la meta "${g.name}"?`, { ok: 'Eliminar', danger: true }))) return;
+      if (!(await confirmDialog(`¿Eliminar la meta "${g.name}"? No se borra ninguna cuenta ni movimiento.`, { ok: 'Eliminar', danger: true }))) return;
       S.goals.splice(S.goals.indexOf(g), 1); close(); changed();
     },
   });
@@ -595,15 +798,39 @@ function debtsView() {
     progressGoal(d.amount ? d.paid / d.amount : 0),
     h('div', { class: 'row-sub' }, (d.direction === 'owe' ? 'Debo yo' : 'Me deben') + ` · pagado ${fmt(d.paid)} de ${fmt(d.amount)}` + (d.note ? ` · ${d.note}` : '')),
     h('div', { class: 'mini-btns' },
-      h('button', { type: 'button', class: 'btn small', onclick: () => contribute(d, 'paid', 'Registrar pago', 'Cantidad pagada') }, 'Registrar pago'),
+      h('button', { type: 'button', class: 'btn small', onclick: () => payDebt(d) }, 'Registrar pago'),
       h('button', { type: 'button', class: 'btn small', onclick: () => editDebt(d) }, 'Editar')));
   return subPage('Deudas y préstamos',
-    h('p', { class: 'help' }, 'Lleva la cuenta de lo que debes y de lo que te deben. Es un contador aparte: no mueve dinero de tus cuentas.'),
+    h('p', { class: 'help' }, 'Lleva la cuenta de lo que debes y de lo que te deben. Al registrar un pago puedes elegir una cuenta para que se apunte también como gasto o ingreso.'),
     S.debts.length ? h('div', { class: 'grid2' },
       h('section', { class: 'card stat' }, h('span', null, 'Debo'), h('b', { class: 'expense' }, fmt(pending('owe')))),
       h('section', { class: 'card stat' }, h('span', null, 'Me deben'), h('b', { class: 'income' }, fmt(pending('owed'))))) : null,
     card(null, S.debts.length ? S.debts.map(row) : empty('No hay deudas apuntadas.')), addBtn('+ Nueva deuda', () => editDebt()));
 }
+function payDebt(d) {
+  const S = app.state;
+  const owe = d.direction === 'owe';
+  openForm({
+    title: 'Registrar pago',
+    values: { accountId: '' },
+    fields: [
+      { key: 'v', label: owe ? 'Cantidad que has pagado' : 'Cantidad que te han pagado', type: 'money', required: true, positive: true, autofocus: true },
+      { key: 'accountId', label: owe ? '¿De qué cuenta ha salido el dinero?' : '¿En qué cuenta ha entrado el dinero?', type: 'select',
+        options: [['', 'No apuntarlo en ninguna cuenta'], ...S.accounts.filter((a) => !a.archived).map((a) => [a.id, a.name])],
+        hint: owe ? 'Si eliges una cuenta, se crea también un gasto en ella.' : 'Si eliges una cuenta, se crea también un ingreso en ella.' },
+    ],
+    onSave: (o) => {
+      d.paid = (d.paid || 0) + o.v;
+      if (o.accountId) {
+        S.tx.push({ id: uid(), ts: Date.now(), type: owe ? 'expense' : 'income', amount: o.v, accountId: o.accountId, toAccountId: null,
+          categoryId: null, date: todayStr(), note: `${owe ? 'Pago de deuda' : 'Cobro de deuda'}: ${d.name}`, tags: [] });
+      }
+      changed();
+      toast(o.accountId ? 'Pago registrado y apuntado en la cuenta' : 'Pago registrado');
+    },
+  });
+}
+
 function editDebt(d) {
   const S = app.state, isNew = !d;
   openForm({
@@ -671,6 +898,12 @@ function dataView() {
         await app.saveFile(`movimientos-${todayStr()}.csv`, toCSV(S), 'text/csv');
       }),
       action('Importar movimientos desde CSV', 'De tu banco, de otra app o de una exportación anterior.', importCSVFlow)),
+    card('Exportación completa',
+      action('Exportar todo sin cifrar (JSON)', 'Todos tus datos en un formato abierto, para llevártelos a otra app. ⚠️ Cualquiera que abra ese archivo los puede leer.', async () => {
+        if (!(await confirmDialog('Este archivo contendrá TODOS tus datos SIN cifrar: cualquiera que lo tenga podrá leerlos. Úsalo solo si lo necesitas y bórralo después. Para guardar una copia, usa la copia de seguridad cifrada.', { ok: 'Exportar igualmente', danger: true }))) return;
+        const { settings, ...rest } = S;
+        await app.saveFile(`mis-finanzas-datos-${todayStr()}.json`, JSON.stringify({ app: 'mis-finanzas', formato: 'datos sin cifrar', nota: 'Importes en céntimos (1250 = 12,50)', moneda: settings.currency, ...rest }, null, 2), 'application/json');
+      })),
     card('Zona peligrosa',
       action('Borrar todos los datos', 'Elimina todo de este móvil. No se puede deshacer.', async () => {
         if (!(await confirmDialog('¿Borrar TODOS los datos de la app en este móvil? No se puede deshacer.', { ok: 'Borrar todo', danger: true }))) return;
@@ -705,7 +938,7 @@ async function importCSVFlow() {
   const snapshot = JSON.stringify(S);
   const finish = (res) => {
     changed();
-    toast(`Importados: ${res.added} · repetidos saltados: ${res.skipped} · filas no válidas: ${res.errors}`,
+    toast(`Importados: ${res.added} · repetidos saltados: ${res.skipped} · filas no válidas: ${res.errors}` + (res.auto ? ` · con categoría automática: ${res.auto}` : ''),
       res.added ? { action: 'Deshacer', onAction: () => { app.state = JSON.parse(snapshot); changed(); } } : {});
   };
   if (isOwnCSV(rows[0])) {
@@ -792,7 +1025,10 @@ function changePasswordFlow() {
       { key: 'pw', label: 'Contraseña nueva (mínimo 8 caracteres)', type: 'password', required: true, autocomplete: 'new-password' },
       { key: 'pw2', label: 'Repite la contraseña nueva', type: 'password', required: true, autocomplete: 'new-password' },
     ],
-    validate: (o) => (o.pw.length < 8 ? 'La contraseña nueva debe tener al menos 8 caracteres.' : o.pw !== o.pw2 ? 'Las dos contraseñas nuevas no coinciden.' : null),
+    validate: (o) => {
+      const st = app.passwordStrength(o.pw);
+      return st.score === 0 ? `Contraseña nueva: ${st.label.toLowerCase()}. ${st.tip}` : o.pw !== o.pw2 ? 'Las dos contraseñas nuevas no coinciden.' : null;
+    },
     onSave: async (o) => {
       const res = await app.changePassword(o.old, o.pw);
       if (res !== true) return res;
@@ -823,4 +1059,4 @@ function aboutView() {
 }
 
 const TABS = { home: homeView, tx: txView, reports: reportsView, more: moreView };
-const SUBS = { accounts: accountsView, categories: categoriesView, budgets: budgetsView, recurring: recurringView, trash: trashView, goals: goalsView, debts: debtsView, data: dataView, settings: settingsView, about: aboutView };
+const SUBS = { accounts: accountsView, categories: categoriesView, budgets: budgetsView, recurring: recurringView, templates: templatesView, rules: rulesView, trash: trashView, goals: goalsView, debts: debtsView, data: dataView, settings: settingsView, about: aboutView };

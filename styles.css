@@ -198,3 +198,15 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
 .split-box { background: var(--card); border-radius: 10px; padding: 10px 8px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -8px; }
 .chip { background: var(--card); color: var(--accent); border-radius: 15px; padding: 5px 11px; font-size: .8rem; min-height: 30px; }
+
+/* ---------- Versión 1.6 ---------- */
+.gap { height: 12px; }
+.row-sub.wrap { white-space: normal; }
+.pad-chips { margin: 4px 0 2px; }
+.chip.big { background: var(--field); font-size: .88rem; padding: 8px 14px; min-height: 38px; }
+.meter { text-align: left; font-size: .78rem; color: var(--muted); margin: -8px 4px 14px; }
+.meter-bars { display: flex; gap: 4px; margin-bottom: 5px; }
+.meter-bars i { flex: 1; height: 4px; border-radius: 2px; background: var(--field); }
+.meter[data-score="0"] i:nth-child(1), .meter[data-score="1"] i:nth-child(1) { background: var(--expense); }
+.meter[data-score="2"] i:nth-child(-n+2) { background: var(--warn); }
+.meter[data-score="3"] i { background: var(--good); }

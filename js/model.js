@@ -11,7 +11,7 @@ export function newState() {
   const inc = [['Nómina', '💼'], ['Otros ingresos', '💶']];
   return {
     version: 1,
-    settings: { currency: 'EUR', theme: 'auto', autoLockMin: 5, lastBackupAt: null, lastAccountId: null },
+    settings: { currency: 'EUR', theme: 'auto', autoLockMin: 5, lastBackupAt: null, lastAccountId: null, totalBudget: null },
     accounts: [
       { id: uid(), name: 'Efectivo', type: 'cash', initial: 0, archived: false },
       { id: uid(), name: 'Banco', type: 'bank', initial: 0, archived: false },
@@ -26,6 +26,8 @@ export function newState() {
     goals: [],
     debts: [],
     trash: [], // movimientos borrados: [{ tx, deletedAt }]
+    rules: [], // reglas de categorías: [{ id, text, categoryId }]
+    templates: [], // plantillas de movimientos frecuentes
   };
 }
 
@@ -34,7 +36,7 @@ export function migrate(S) {
   const base = newState();
   if (!S || typeof S !== 'object') return base;
   S.settings = { ...base.settings, ...(S.settings || {}) };
-  for (const k of ['accounts', 'categories', 'tx', 'budgets', 'recurring', 'goals', 'debts', 'trash']) {
+  for (const k of ['accounts', 'categories', 'tx', 'budgets', 'recurring', 'goals', 'debts', 'trash', 'rules', 'templates']) {
     if (!Array.isArray(S[k])) S[k] = [];
   }
   S.version = 1;
@@ -56,10 +58,19 @@ function delta(t, ids) {
   return (ids.has(t.accountId) ? -(t.amount + (t.fee || 0)) : 0) + (ids.has(t.toAccountId) ? t.amount : 0);
 }
 
-export function balances(S) {
+// Un movimiento con fecha futura está "pendiente": se ve en la lista,
+// pero no cuenta en saldos ni informes hasta que llega su día.
+export const isPending = (t, today = todayStr()) => t.date > today;
+
+// ¿La fecha d cae en el periodo? El periodo puede ser un texto ('2026-11' = ese mes,
+// '2026' = ese año) o un rango { from, to } con fechas incluidas.
+const inPer = (d, per) => (typeof per === 'string' ? d.startsWith(per) : d >= per.from && d <= per.to);
+
+export function balances(S, today = todayStr()) {
   const map = new Map(S.accounts.map((a) => [a.id, a.initial || 0]));
   const add = (id, v) => { if (map.has(id)) map.set(id, map.get(id) + v); };
   for (const t of S.tx) {
+    if (t.date > today) continue;
     if (t.type === 'expense') add(t.accountId, -t.amount);
     else if (t.type === 'income') add(t.accountId, t.amount);
     else { add(t.accountId, -(t.amount + (t.fee || 0))); add(t.toAccountId, t.amount); }
@@ -69,19 +80,20 @@ export function balances(S) {
 
 // Saldo que quedaba después de cada movimiento. Devuelve un Map: id del movimiento -> saldo.
 // Con accountId: saldo de esa cuenta. Sin él: suma de todas las cuentas no archivadas.
-export function runningBalances(S, accountId) {
+// Los movimientos pendientes (fecha futura) no aparecen en el Map.
+export function runningBalances(S, accountId, today = todayStr()) {
   const ids = new Set(accountId ? [accountId] : S.accounts.filter((a) => !a.archived).map((a) => a.id));
   let v = S.accounts.filter((a) => ids.has(a.id)).reduce((s, a) => s + (a.initial || 0), 0);
-  const sorted = [...S.tx].sort((a, b) => a.date.localeCompare(b.date) || (a.ts || 0) - (b.ts || 0));
+  const sorted = S.tx.filter((t) => t.date <= today).sort((a, b) => a.date.localeCompare(b.date) || (a.ts || 0) - (b.ts || 0));
   const map = new Map();
   for (const t of sorted) { v += delta(t, ids); map.set(t.id, v); }
   return map;
 }
 
-export function monthTotals(S, ym) {
+export function monthTotals(S, per, today = todayStr()) {
   let income = 0, expense = 0;
   for (const t of S.tx) {
-    if (!t.date.startsWith(ym)) continue;
+    if (t.date > today || !inPer(t.date, per)) continue;
     if (t.type === 'income') income += t.amount;
     else if (t.type === 'expense') expense += t.amount;
     else expense += t.fee || 0; // la comisión de una transferencia es un gasto
@@ -89,12 +101,12 @@ export function monthTotals(S, ym) {
   return { income, expense, net: income - expense };
 }
 
-// Devuelve [{cat, total}] ordenado de mayor a menor para un mes y tipo.
-export function byCategory(S, ym, kind) {
+// Devuelve [{cat, total}] ordenado de mayor a menor para un periodo y tipo.
+export function byCategory(S, per, kind, today = todayStr()) {
   const sums = new Map();
   const add = (k, v) => sums.set(k, (sums.get(k) || 0) + v);
   for (const t of S.tx) {
-    if (!t.date.startsWith(ym)) continue;
+    if (t.date > today || !inPer(t.date, per)) continue;
     if (t.type === kind) for (const p of txParts(t)) add(p.categoryId || '', p.amount);
     else if (kind === 'expense' && t.type === 'transfer' && t.fee) add(FEE_CATEGORY.id, t.fee);
   }
@@ -103,13 +115,54 @@ export function byCategory(S, ym, kind) {
     .sort((a, b) => b.total - a.total);
 }
 
-export function spentInCategory(S, ym, categoryId) {
+// Movimientos de una categoría en un periodo (para ver el detalle desde Informes).
+export function txOfCategory(S, per, kind, catId, today = todayStr()) {
+  return S.tx.filter((t) => t.date <= today && inPer(t.date, per) && (catId === FEE_CATEGORY.id
+    ? t.type === 'transfer' && t.fee
+    : t.type === kind && txParts(t).some((p) => (p.categoryId || '') === catId)));
+}
+
+export function spentInCategory(S, per, categoryId, today = todayStr()) {
   let s = 0;
   for (const t of S.tx) {
-    if (t.type !== 'expense' || !t.date.startsWith(ym)) continue;
+    if (t.type !== 'expense' || t.date > today || !inPer(t.date, per)) continue;
     for (const p of txParts(t)) if (p.categoryId === categoryId) s += p.amount;
   }
   return s;
+}
+
+// Estado de un presupuesto en un mes. Si tiene "arrastre", lo que sobró (o faltó)
+// en los meses anteriores se suma (o resta) al límite de este mes.
+export function budgetStatus(S, b, ym, today = todayStr()) {
+  const spent = spentInCategory(S, ym, b.categoryId, today);
+  let carry = 0;
+  if (b.rollover && b.since && b.since < ym) {
+    for (let m = b.since, i = 0; m < ym && i < 240; m = addMonthsYm(m, 1), i++) carry += b.amount - spentInCategory(S, m, b.categoryId, today);
+  }
+  return { spent, carry, limit: b.amount + carry };
+}
+
+// ---------- Reglas de categorías ----------
+// Devuelve la categoría de la primera regla cuyo texto aparezca en la nota (o null).
+export function ruleCategory(S, note, type) {
+  const n = (note || '').toLowerCase();
+  if (!n) return null;
+  for (const r of S.rules) {
+    const c = S.categories.find((x) => x.id === r.categoryId);
+    if (c && c.kind === type && r.text && n.includes(r.text.toLowerCase())) return c.id;
+  }
+  return null;
+}
+
+// Aplica las reglas a los movimientos que no tienen categoría. Devuelve cuántos cambió.
+export function applyRules(S) {
+  let n = 0;
+  for (const t of S.tx) {
+    if (t.type === 'transfer' || t.categoryId || (t.splits && t.splits.length)) continue;
+    const id = ruleCategory(S, t.note, t.type);
+    if (id) { t.categoryId = id; n++; }
+  }
+  return n;
 }
 
 // ---------- Etiquetas ----------
@@ -130,10 +183,10 @@ export function parseTags(text) {
 }
 
 // Gastos del mes por etiqueta: [{tag, total}]
-export function byTag(S, ym) {
+export function byTag(S, per, today = todayStr()) {
   const sums = new Map();
   for (const t of S.tx) {
-    if (t.type !== 'expense' || !t.date.startsWith(ym)) continue;
+    if (t.type !== 'expense' || t.date > today || !inPer(t.date, per)) continue;
     for (const tag of t.tags || []) sums.set(tag, (sums.get(tag) || 0) + t.amount);
   }
   return [...sums.entries()].map(([tag, total]) => ({ tag, total })).sort((a, b) => b.total - a.total);
@@ -148,13 +201,14 @@ export function purgeTrash(S, now = Date.now()) {
 }
 
 // Patrimonio (suma de cuentas no archivadas) al final de cada uno de los últimos n meses.
-export function netWorthSeries(S, endYm, n) {
+export function netWorthSeries(S, endYm, n, today = todayStr()) {
   const ids = new Set(S.accounts.filter((a) => !a.archived).map((a) => a.id));
   const base = S.accounts.filter((a) => ids.has(a.id)).reduce((s, a) => s + (a.initial || 0), 0);
   const out = [];
   for (let i = n - 1; i >= 0; i--) {
     const ym = addMonthsYm(endYm, -i);
-    const limit = ym + '-31';
+    const end = ym + '-31';
+    const limit = end < today ? end : today; // los pendientes no cuentan
     let v = base;
     for (const t of S.tx) if (t.date <= limit) v += delta(t, ids);
     out.push({ ym, value: v });
@@ -289,7 +343,7 @@ export function importOwnCSV(S, rows, skipDup = true) {
 // Importa un CSV de un banco u otra app. Importe negativo = gasto, positivo = ingreso.
 export function importGenericCSV(S, rows, { dateCol, amountCol, descCol, catCol, accountId, skipDup = true }) {
   const sigs = allSigs(S);
-  const res = { added: 0, skipped: 0, errors: 0 };
+  const res = { added: 0, skipped: 0, errors: 0, auto: 0 };
   for (const r of rows.slice(1)) {
     const date = parseDateFlexible(r[dateCol]);
     const cents = parseAmount(r[amountCol] || '');
@@ -297,9 +351,12 @@ export function importGenericCSV(S, rows, { dateCol, amountCol, descCol, catCol,
     const type = cents < 0 ? 'expense' : 'income';
     const t = { id: uid(), type, amount: Math.abs(cents), date, note: descCol >= 0 ? clean(r[descCol]) : '', ts: Date.now(), accountId, toAccountId: null, categoryId: null };
     if (catCol >= 0 && clean(r[catCol])) t.categoryId = findOrCreateCategory(S, clean(r[catCol]), type).id;
+    if (!t.categoryId) t.categoryId = ruleCategory(S, t.note, type); // reglas de categorías automáticas
+    const byRule = !!t.categoryId && !(catCol >= 0 && clean(r[catCol]));
     const sig = txSig(t);
     if (skipDup && sigs.has(sig)) { res.skipped++; continue; }
     sigs.add(sig); S.tx.push(t); res.added++;
+    if (byRule) res.auto++;
   }
   return res;
 }
